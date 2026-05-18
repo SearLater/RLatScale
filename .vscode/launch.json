@@ -1,0 +1,25 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "CPU Test (Gymnasium)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "RLatScale.gym_test.cpu_test",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python3",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "GPU Test (Gymnax)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "RLatScale.gym_test.gpu_test",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python3",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        }
+    ]
+}

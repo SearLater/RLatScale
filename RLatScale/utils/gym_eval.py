@@ -1,0 +1,1 @@
+""" Eval file to automatically generate curves based on results folder, which will be the outputs of the CPU and GPU tests """
