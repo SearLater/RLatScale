@@ -132,8 +132,8 @@ def train(
     actor = Actor(obs_dim, action_dim, config.hidden_dim, nnx.Rngs(seed_a))
     critic = Critic(obs_dim, config.hidden_dim, nnx.Rngs(seed_c))
 
-    actor_opt = nnx.Optimizer(actor, _make_tx(config.lr_actor, config.max_grad_norm_actor))
-    critic_opt = nnx.Optimizer(critic, _make_tx(config.lr_critic, config.max_grad_norm_critic))
+    actor_opt = nnx.Optimizer(actor, _make_tx(config.lr_actor, config.max_grad_norm_actor), wrt=nnx.Param)
+    critic_opt = nnx.Optimizer(critic, _make_tx(config.lr_critic, config.max_grad_norm_critic), wrt=nnx.Param)
 
     # --- Reset environments ---
     rng, rng_reset = jax.random.split(rng)
@@ -206,8 +206,8 @@ def train(
             v = critic(obs_mb)
             return 0.5 * jnp.mean((v - tgt_mb) ** 2)
 
-        actor_opt.update(nnx.grad(actor_loss_fn)(actor))
-        critic_opt.update(nnx.grad(critic_loss_fn)(critic))
+        actor_opt.update(actor, nnx.grad(actor_loss_fn)(actor))
+        critic_opt.update(critic, nnx.grad(critic_loss_fn)(critic))
 
     # --- Outer Python loop over rollout iterations ---
     metrics: list[dict] = []

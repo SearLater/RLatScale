@@ -32,14 +32,14 @@ class Config:
 
     # --- Experiment ---
     # tuple used (not list) so Config remains hashable for jax.tree_util.register_static
-    num_seeds: int = 10
+    num_seeds: int = 1
     envs: tuple[str, ...] = ("CartPole-v1", "Pendulum-v1")
     impls: tuple[str, ...] = ("linen", "nnx")
     results_dir: str = "results"
     # Leave empty to auto-detect from JAX backend + system info.
     # Set explicitly to label runs (e.g. "m3_8gb", "4090_pcie") when
     # auto-detection is ambiguous or you want finer-grained separation.
-    hardware_tag: str = ""
+    hardware_tag: str = "Macbook"
 
     @property
     def batch_size(self) -> int:
@@ -59,13 +59,14 @@ class Config:
 class GPUConfig(Config):
     """JAX-native GPU config: large parallel env count for vectorised simulation.
 
-    batch_size  = 2048 * 10 = 20_480
-    minibatch   = 20_480 // 8 = 2_560
-    num_rollouts = 1_000_000 // 20_480 ≈ 48
+    batch_size   = 2048 * 128 = 262_144
+    minibatch    = 262_144 // 8 = 32_768
+    num_rollouts = 50_000_000 // 262_144 ≈ 190
     """
 
+    total_timesteps: int = 50_000_000
     num_envs: int = 2048
-    num_steps: int = 10
+    num_steps: int = 128
     num_minibatches: int = 8
 
 
@@ -96,11 +97,13 @@ class MuJoCoConfig(Config):
 class BraxConfig(GPUConfig):
     """Brax JAX-native GPU config.
 
-    Inherits GPUConfig batch geometry (2048 envs × 10 steps).
-    Env names use Brax identifiers (lowercase, no version suffix).
+    batch_size   = 2048 * 10 = 20_480
+    minibatch    = 20_480 // 8 = 2_560
+    num_rollouts = 2_000_000 // 20_480 ≈ 97
     """
 
     total_timesteps: int = 2_000_000
+    num_steps: int = 10
     num_seeds: int = 5
     envs: tuple[str, ...] = ("halfcheetah", "ant")
 
@@ -115,5 +118,6 @@ class MjxConfig(GPUConfig):
     """
 
     total_timesteps: int = 2_000_000
+    num_steps: int = 10
     num_seeds: int = 5
     envs: tuple[str, ...] = ("halfcheetah", "ant")

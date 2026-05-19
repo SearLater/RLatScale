@@ -498,8 +498,8 @@ def train_nnx_gymnasium(
         sched = optax.linear_schedule(lr, 0.0, n_updates) if config.anneal_lr else lr
         return optax.chain(optax.clip_by_global_norm(clip), optax.adam(sched, eps=1e-5))
 
-    actor_opt  = nnx.Optimizer(actor,  _opt(config.lr_actor,  config.max_grad_norm_actor))
-    critic_opt = nnx.Optimizer(critic, _opt(config.lr_critic, config.max_grad_norm_critic))
+    actor_opt  = nnx.Optimizer(actor,  _opt(config.lr_actor,  config.max_grad_norm_actor), wrt=nnx.Param)
+    critic_opt = nnx.Optimizer(critic, _opt(config.lr_critic, config.max_grad_norm_critic), wrt=nnx.Param)
 
     @nnx.jit
     def _forward(actor, critic, obs_j):
@@ -529,8 +529,8 @@ def train_nnx_gymnasium(
         def critic_loss(critic):
             return 0.5 * jnp.mean((critic(obs_mb) - tgt) ** 2)
 
-        actor_opt.update(nnx.grad(actor_loss)(actor))
-        critic_opt.update(nnx.grad(critic_loss)(critic))
+        actor_opt.update(actor, nnx.grad(actor_loss)(actor))
+        critic_opt.update(critic, nnx.grad(critic_loss)(critic))
 
     obs_np, _ = envs.reset(seed=seed)
     ep_buf    = np.zeros(config.num_envs, dtype=np.float32)
@@ -664,8 +664,19 @@ def aggregate_metrics(seed_results: list[dict], env_id: str) -> dict:
     )
     norm_matrix = _normalise(raw_matrix, env_id)  # (num_seeds, num_rollouts)
 
+    # Forward-fill NaN values (rollouts where no episode completed).
+    # Leading NaN → 0 (no data yet = worst-case performance).
+    norm_filled = norm_matrix.copy()
+    for s in range(n_seeds):
+        last = 0.0
+        for t in range(n_rollouts):
+            if np.isnan(norm_filled[s, t]):
+                norm_filled[s, t] = last
+            else:
+                last = float(norm_filled[s, t])
+
     # ── Sample efficiency: AUC of normalised learning curve ──────────────────
-    auc_per_seed = np.trapz(norm_matrix, axis=1) / n_rollouts  # (num_seeds,)
+    auc_per_seed = np.trapezoid(norm_filled, axis=1) / n_rollouts  # (num_seeds,)
 
     # ── rliable IQM + 95 % CI on per-seed AUC ────────────────────────────────
     # rliable expects shape (num_runs, num_tasks); single task → (num_seeds, 1)
@@ -676,7 +687,7 @@ def aggregate_metrics(seed_results: list[dict], env_id: str) -> dict:
 
     # ── rliable IQM learning curve (IQM at each rollout checkpoint) ──────────
     iqm_curve = np.array([
-        rl_metrics.aggregate_iqm(norm_matrix[:, t : t + 1])
+        rl_metrics.aggregate_iqm(norm_filled[:, t : t + 1])
         for t in range(n_rollouts)
     ])
 
@@ -696,8 +707,8 @@ def aggregate_metrics(seed_results: list[dict], env_id: str) -> dict:
         "iqm_ci_lo":      float(iqm_cis[impl_key][0][0]),
         "iqm_ci_hi":      float(iqm_cis[impl_key][1][0]),
         "iqm_curve":      iqm_curve.tolist(),
-        "p25_curve":      np.percentile(norm_matrix, 25, axis=0).tolist(),
-        "p75_curve":      np.percentile(norm_matrix, 75, axis=0).tolist(),
+        "p25_curve":      np.percentile(norm_filled, 25, axis=0).tolist(),
+        "p75_curve":      np.percentile(norm_filled, 75, axis=0).tolist(),
         # Wall-clock
         "mean_time_to_threshold":   float(np.mean(t2t))  if t2t else float("nan"),
         "median_time_to_threshold": float(np.median(t2t)) if t2t else float("nan"),

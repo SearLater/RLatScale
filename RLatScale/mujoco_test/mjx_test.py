@@ -65,26 +65,28 @@ class MjxEnv:
 
     _CONFIGS = {
         "halfcheetah": {
-            "gym_id":       "HalfCheetah-v4",
-            "obs_dim":      17,
-            "act_dim":      6,
-            "episode_len":  1000,
+            "gym_id":         "HalfCheetah-v4",
+            "obs_dim":        17,
+            "act_dim":        6,
+            "episode_len":    1000,
+            "frame_skip":     5,      # matches Gymnasium HalfCheetah-v4 default
             "forward_weight": 1.0,
             "ctrl_weight":    0.1,
             "healthy_reward": 0.0,
-            "terminate": False,
+            "terminate":      False,
         },
         "ant": {
-            "gym_id":       "Ant-v4",
-            "obs_dim":      27,
-            "act_dim":      8,
-            "episode_len":  1000,
+            "gym_id":         "Ant-v4",
+            "obs_dim":        27,
+            "act_dim":        8,
+            "episode_len":    1000,
+            "frame_skip":     5,      # matches Gymnasium Ant-v4 default
             "forward_weight": 1.0,
             "ctrl_weight":    0.5,
             "healthy_reward": 1.0,
-            "terminate": True,
-            "healthy_z_min": 0.2,
-            "healthy_z_max": 1.0,
+            "terminate":      True,
+            "healthy_z_min":  0.2,
+            "healthy_z_max":  1.0,
         },
     }
 
@@ -98,8 +100,11 @@ class MjxEnv:
         xml_path = gym_env.unwrapped.fullpath
         gym_env.close()
 
-        self._mj_model  = mujoco.MjModel.from_xml_path(xml_path)
-        self._mjx_model = mjx.put_model(self._mj_model)
+        self._mj_model   = mujoco.MjModel.from_xml_path(xml_path)
+        self._mjx_model  = mjx.put_model(self._mj_model)
+        self._frame_skip = cfg["frame_skip"]
+        # dt used for velocity rewards — matches Gymnasium's self.dt
+        self._dt = float(self._mj_model.opt.timestep) * self._frame_skip
 
         self.observation_size = cfg["obs_dim"]
         self.action_size      = cfg["act_dim"]
@@ -125,21 +130,11 @@ class MjxEnv:
             ])
 
     def _reward(self, data_before: mjx.Data, data_after: mjx.Data, action: jax.Array) -> jax.Array:
-        cfg = self._cfg
-        dt  = self._mj_model.opt.timestep * self._mj_model.opt.integrator_dt \
-              if hasattr(self._mj_model.opt, 'integrator_dt') else self._mj_model.opt.timestep
-
-        if self._env_name == "halfcheetah":
-            x_vel     = (data_after.qpos[0] - data_before.qpos[0]) / dt
-            forward_r = cfg["forward_weight"] * x_vel
-            ctrl_cost = cfg["ctrl_weight"] * jnp.sum(action ** 2)
-            return forward_r - ctrl_cost
-
-        else:  # ant
-            x_vel     = (data_after.qpos[0] - data_before.qpos[0]) / dt
-            forward_r = cfg["forward_weight"] * x_vel
-            ctrl_cost = cfg["ctrl_weight"] * jnp.sum(action ** 2)
-            return forward_r - ctrl_cost + cfg["healthy_reward"]
+        cfg   = self._cfg
+        x_vel = (data_after.qpos[0] - data_before.qpos[0]) / self._dt  # matches Gymnasium
+        forward_r = cfg["forward_weight"] * x_vel
+        ctrl_cost = cfg["ctrl_weight"] * jnp.sum(action ** 2)
+        return forward_r - ctrl_cost + cfg["healthy_reward"]
 
     def _done(self, data: mjx.Data, step_count: jax.Array) -> jax.Array:
         truncated = step_count >= self.episode_length
@@ -173,16 +168,21 @@ class MjxEnv:
         )
 
     def step(self, state: MjxState, action: jax.Array, step_count: jax.Array) -> MjxState:
-        data_before = state.mjx_data
-        data        = data_before.replace(ctrl=action)
-        data        = mjx.step(self._mjx_model, data)
+        data_before = state.mjx_data.replace(ctrl=action)
 
-        reward = self._reward(data_before, data, action)
-        obs    = self._obs(data)
-        done   = self._done(data, step_count)
+        # Apply frame_skip physics substeps with the same control signal.
+        # This matches Gymnasium's frame_skip implementation and ensures that
+        # dt = timestep * frame_skip is consistent with the reward calculation.
+        def _substep(data, _):
+            return mjx.step(self._mjx_model, data), None
 
-        # Auto-reset: if done, blend with a fresh state
-        return MjxState(mjx_data=data, obs=obs, reward=reward, done=done)
+        data_after, _ = jax.lax.scan(_substep, data_before, None, length=self._frame_skip)
+
+        reward = self._reward(data_before, data_after, action)
+        obs    = self._obs(data_after)
+        done   = self._done(data_after, step_count)
+
+        return MjxState(mjx_data=data_after, obs=obs, reward=reward, done=done)
 
 
 # ---------------------------------------------------------------------------
@@ -439,8 +439,8 @@ def train_nnx_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
         sched = optax.linear_schedule(lr, 0.0, total_updates) if config.anneal_lr else lr
         return optax.chain(optax.clip_by_global_norm(clip), optax.adam(sched, eps=1e-5))
 
-    actor_opt  = nnx.Optimizer(actor,  _opt(config.lr_actor,  config.max_grad_norm_actor))
-    critic_opt = nnx.Optimizer(critic, _opt(config.lr_critic, config.max_grad_norm_critic))
+    actor_opt  = nnx.Optimizer(actor,  _opt(config.lr_actor,  config.max_grad_norm_actor), wrt=nnx.Param)
+    critic_opt = nnx.Optimizer(critic, _opt(config.lr_critic, config.max_grad_norm_critic), wrt=nnx.Param)
 
     vmapped_reset = jax.vmap(env.reset)
     vmapped_step  = jax.vmap(env.step)
@@ -506,8 +506,8 @@ def train_nnx_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
         def critic_loss(critic):
             return 0.5 * jnp.mean((critic(obs_mb) - tgt) ** 2)
 
-        actor_opt.update(nnx.grad(actor_loss)(actor))
-        critic_opt.update(nnx.grad(critic_loss)(critic))
+        actor_opt.update(actor, nnx.grad(actor_loss)(actor))
+        critic_opt.update(critic, nnx.grad(critic_loss)(critic))
 
     def _gae(transitions: MjxTransition, last_value: jax.Array):
         def _step(carry, t: MjxTransition):

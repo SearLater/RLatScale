@@ -375,8 +375,8 @@ def train_nnx_gymnax(config: Config, env_id: str, seed: int) -> dict:
         sched = optax.linear_schedule(lr, 0.0, total_updates) if config.anneal_lr else lr
         return optax.chain(optax.clip_by_global_norm(clip), optax.adam(sched, eps=1e-5))
 
-    actor_opt  = nnx.Optimizer(actor,  _opt(config.lr_actor,  config.max_grad_norm_actor))
-    critic_opt = nnx.Optimizer(critic, _opt(config.lr_critic, config.max_grad_norm_critic))
+    actor_opt  = nnx.Optimizer(actor,  _opt(config.lr_actor,  config.max_grad_norm_actor), wrt=nnx.Param)
+    critic_opt = nnx.Optimizer(critic, _opt(config.lr_critic, config.max_grad_norm_critic), wrt=nnx.Param)
 
     rng, rng_reset = jax.random.split(rng)
     obs, env_state = jax.vmap(env.reset, in_axes=(0, None))(
@@ -450,8 +450,8 @@ def train_nnx_gymnax(config: Config, env_id: str, seed: int) -> dict:
         def critic_loss(critic):
             return 0.5 * jnp.mean((critic(obs_mb) - tgt) ** 2)
 
-        actor_opt.update(nnx.grad(actor_loss)(actor))
-        critic_opt.update(nnx.grad(critic_loss)(critic))
+        actor_opt.update(actor, nnx.grad(actor_loss)(actor))
+        critic_opt.update(critic, nnx.grad(critic_loss)(critic))
 
     def _gae(transitions: GpuTransition, last_value: jax.Array):
         def _step(carry, t: GpuTransition):

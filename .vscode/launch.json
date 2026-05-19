@@ -2,7 +2,7 @@
     "version": "0.2.0",
     "configurations": [
         {
-            "name": "CPU Test (Gymnasium)",
+            "name": "CPU Test — Gymnasium (CartPole, Pendulum)",
             "type": "debugpy",
             "request": "launch",
             "module": "RLatScale.gym_test.cpu_test",
@@ -12,10 +12,40 @@
             "justMyCode": true
         },
         {
-            "name": "GPU Test (Gymnax)",
+            "name": "GPU Test — Gymnax (CartPole, Pendulum)",
             "type": "debugpy",
             "request": "launch",
             "module": "RLatScale.gym_test.gpu_test",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python3",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "CPU Test — MuJoCo (HalfCheetah, Ant)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "RLatScale.mujoco_test.cpu_test",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python3",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "GPU Test — Brax (HalfCheetah, Ant)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "RLatScale.mujoco_test.brax_test",
+            "cwd": "${workspaceFolder}",
+            "python": "${workspaceFolder}/.venv/bin/python3",
+            "console": "integratedTerminal",
+            "justMyCode": true
+        },
+        {
+            "name": "GPU Test — MJX (HalfCheetah, Ant)",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "RLatScale.mujoco_test.mjx_test",
             "cwd": "${workspaceFolder}",
             "python": "${workspaceFolder}/.venv/bin/python3",
             "console": "integratedTerminal",
