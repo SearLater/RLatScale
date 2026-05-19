@@ -68,6 +68,7 @@ class GPUConfig(Config):
     num_envs: int = 2048
     num_steps: int = 128
     num_minibatches: int = 8
+    num_seeds: int = 3
 
 
 @jax.tree_util.register_static
@@ -106,6 +107,7 @@ class BraxConfig(GPUConfig):
     num_steps: int = 10
     num_seeds: int = 5
     envs: tuple[str, ...] = ("halfcheetah", "ant")
+    results_dir: str = "results/brax"
 
 
 @jax.tree_util.register_static
@@ -121,3 +123,4 @@ class MjxConfig(GPUConfig):
     num_steps: int = 10
     num_seeds: int = 5
     envs: tuple[str, ...] = ("halfcheetah", "ant")
+    results_dir: str = "results/mjx"

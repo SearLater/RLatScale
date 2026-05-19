@@ -203,49 +203,60 @@ class MjxTransition(NamedTuple):
 # Linen — full scan training on MJX
 # ---------------------------------------------------------------------------
 
-def make_train_mjx_linen(config: MjxConfig, env: MjxEnv):
-    """Return a pure ``train(rng) -> (AgentState, ep_return_by_rollout)``."""
+# ---------------------------------------------------------------------------
+# Linen — Python-loop training on MJX (per-rollout JIT, same as NNX)
+#
+# A full outer jax.lax.scan over num_rollouts hangs at XLA compile time for
+# complex physics envs.  Only the inner num_steps scan is JIT-compiled.
+# ---------------------------------------------------------------------------
 
+def train_linen_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
+    """Run PPO (Flax Linen, Python outer loop) on an MJX environment."""
+    gym_id    = MjxEnv._CONFIGS[env_id]["gym_id"]
+    threshold = _ENV_META[gym_id]["threshold"]
+
+    env        = MjxEnv(env_id)
     obs_dim    = env.observation_size
     action_dim = env.action_size
+
+    rng = jax.random.key(seed)
+    rng, rng_a, rng_c = jax.random.split(rng, 3)
+
     total_updates = config.num_rollouts * config.num_epochs * config.num_minibatches
 
     def _make_opt(lr, clip):
         sched = optax.linear_schedule(lr, 0.0, total_updates) if config.anneal_lr else lr
         return optax.chain(optax.clip_by_global_norm(clip), optax.adam(sched, eps=1e-5))
 
+    dummy = jnp.zeros((1, obs_dim))
+    actor_net  = ContinuousActorLinen(action_dim=action_dim, hidden_dim=config.hidden_dim)
+    critic_net = LinenCritic(hidden_dim=config.hidden_dim)
+    actor_state = TrainState.create(
+        apply_fn=actor_net.apply,
+        params=actor_net.init(rng_a, dummy),
+        tx=_make_opt(config.lr_actor, config.max_grad_norm_actor),
+    )
+    critic_state = TrainState.create(
+        apply_fn=critic_net.apply,
+        params=critic_net.init(rng_c, dummy),
+        tx=_make_opt(config.lr_critic, config.max_grad_norm_critic),
+    )
+    agent_state = AgentState(actor_state, critic_state)
+
     vmapped_reset = jax.vmap(env.reset)
     vmapped_step  = jax.vmap(env.step)
 
-    def train(rng: jax.Array):
-        rng, rng_a, rng_c = jax.random.split(rng, 3)
-        dummy = jnp.zeros((1, obs_dim))
+    rng, rng_reset = jax.random.split(rng)
+    mjx_state   = vmapped_reset(jax.random.split(rng_reset, config.num_envs))
+    ep_buf      = jnp.zeros(config.num_envs)
+    step_counts = jnp.zeros(config.num_envs, dtype=jnp.int32)
 
-        actor_net  = ContinuousActorLinen(action_dim=action_dim, hidden_dim=config.hidden_dim)
-        critic_net = LinenCritic(hidden_dim=config.hidden_dim)
-
-        actor_state = TrainState.create(
-            apply_fn=actor_net.apply,
-            params=actor_net.init(rng_a, dummy),
-            tx=_make_opt(config.lr_actor, config.max_grad_norm_actor),
-        )
-        critic_state = TrainState.create(
-            apply_fn=critic_net.apply,
-            params=critic_net.init(rng_c, dummy),
-            tx=_make_opt(config.lr_critic, config.max_grad_norm_critic),
-        )
-        agent_state = AgentState(actor_state, critic_state)
-
-        rng, rng_reset = jax.random.split(rng)
-        mjx_state = vmapped_reset(jax.random.split(rng_reset, config.num_envs))
-        ep_buf      = jnp.zeros(config.num_envs)
-        step_counts = jnp.zeros(config.num_envs, dtype=jnp.int32)
-
+    @jax.jit
+    def _collect_rollout(agent_state, mjx_state, ep_buf, step_counts, rng):
         def _env_step(carry, _):
-            agent_state, mjx_state, ep_buf, step_counts, rng = carry
-            obs = mjx_state.obs   # (num_envs, obs_dim)
+            mjx_state, ep_buf, step_counts, rng = carry
+            obs = mjx_state.obs
             rng, rng_act = jax.random.split(rng)
-
             mean, log_std = agent_state.actor_state.apply_fn(
                 agent_state.actor_state.params, obs
             )
@@ -255,160 +266,124 @@ def make_train_mjx_linen(config: MjxConfig, env: MjxEnv):
             value    = agent_state.critic_state.apply_fn(
                 agent_state.critic_state.params, obs
             )
-
             step_counts = step_counts + 1
             mjx_state   = vmapped_step(mjx_state, action, step_counts)
             reward = mjx_state.reward
             done   = mjx_state.done.astype(jnp.float32)
-
             ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
             ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
-            # Reset step counter for done envs
             step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
-
             t = MjxTransition(obs, action, reward, done, log_prob, value, ep_return)
-            return (agent_state, mjx_state, ep_buf_new, step_counts, rng), t
+            return (mjx_state, ep_buf_new, step_counts, rng), t
 
-        def _update_minibatch(agent_state: AgentState, mb) -> AgentState:
-            obs_mb, act_mb, lp_old_mb, adv_mb, tgt_mb = mb
+        (mjx_state, ep_buf, step_counts, rng), transitions = jax.lax.scan(
+            _env_step, (mjx_state, ep_buf, step_counts, rng), None, length=config.num_steps
+        )
+        return mjx_state, ep_buf, step_counts, rng, transitions
 
-            adv_mb = jax.lax.cond(
-                config.advantage_norm,
-                lambda a: (a - a.mean()) / (a.std() + 1e-8),
-                lambda a: a,
-                adv_mb,
+    @jax.jit
+    def _update_mb(agent_state, obs_mb, act_mb, lp_old_mb, adv_mb, tgt_mb):
+        if config.advantage_norm:
+            adv_mb = (adv_mb - adv_mb.mean()) / (adv_mb.std() + 1e-8)
+
+        def actor_loss_fn(params):
+            mean, log_std = agent_state.actor_state.apply_fn(params, obs_mb)
+            lp  = _normal_log_prob(act_mb, mean, log_std)
+            ent = _normal_entropy(log_std)
+            ratio = jnp.exp(lp - lp_old_mb)
+            pg = jnp.maximum(
+                -adv_mb * ratio,
+                -adv_mb * jnp.clip(ratio, 1 - config.clip_eps, 1 + config.clip_eps),
+            ).mean()
+            return pg - config.entropy_beta * ent.mean()
+
+        def critic_loss_fn(params):
+            return 0.5 * jnp.mean(
+                (agent_state.critic_state.apply_fn(params, obs_mb) - tgt_mb) ** 2
             )
 
-            def actor_loss_fn(params):
-                mean, log_std = agent_state.actor_state.apply_fn(params, obs_mb)
-                lp  = _normal_log_prob(act_mb, mean, log_std)
-                ent = _normal_entropy(log_std)
-                ratio = jnp.exp(lp - lp_old_mb)
-                pg = jnp.maximum(
-                    -adv_mb * ratio,
-                    -adv_mb * jnp.clip(ratio, 1 - config.clip_eps, 1 + config.clip_eps),
-                ).mean()
-                return pg - config.entropy_beta * ent.mean()
+        return AgentState(
+            agent_state.actor_state.apply_gradients(
+                grads=jax.grad(actor_loss_fn)(agent_state.actor_state.params)
+            ),
+            agent_state.critic_state.apply_gradients(
+                grads=jax.grad(critic_loss_fn)(agent_state.critic_state.params)
+            ),
+        )
 
-            def critic_loss_fn(params):
-                return 0.5 * jnp.mean(
-                    (agent_state.critic_state.apply_fn(params, obs_mb) - tgt_mb) ** 2
-                )
+    def _gae(transitions: MjxTransition, last_value: jax.Array):
+        def _step(carry, t: MjxTransition):
+            gae, nv = carry
+            delta = t.reward + config.gamma * nv * (1 - t.done) - t.value
+            gae   = delta + config.gamma * config.gae_lambda * (1 - t.done) * gae
+            return (gae, t.value), (gae, gae + t.value)
 
-            return AgentState(
-                agent_state.actor_state.apply_gradients(
-                    grads=jax.grad(actor_loss_fn)(agent_state.actor_state.params)
-                ),
-                agent_state.critic_state.apply_gradients(
-                    grads=jax.grad(critic_loss_fn)(agent_state.critic_state.params)
-                ),
-            )
+        _, (adv, tgt) = jax.lax.scan(
+            _step, (jnp.zeros_like(last_value), last_value), transitions, reverse=True
+        )
+        return adv, tgt
 
-        def _update_epoch(carry, _):
-            agent_state, transitions, advantages, targets, rng = carry
-            rng, rng_perm = jax.random.split(rng)
-            B = config.batch_size
-            perm = jax.random.permutation(rng_perm, B)
+    returns_by_rollout: list[float] = []
+    steps_by_rollout:   list[int]   = []
+    time_by_rollout:    list[float] = []
+    time_to_threshold  = -1.0
+    steps_to_threshold = -1
+    total_steps = 0
+    t0       = time.perf_counter()
+    rng_perm = jax.random.key(seed + 99_999)
+
+    for _ in tqdm(range(config.num_rollouts), desc=f"linen_mjx/{env_id}/s{seed}", leave=False):
+        mjx_state, ep_buf, step_counts, rng, transitions = _collect_rollout(
+            agent_state, mjx_state, ep_buf, step_counts, rng
+        )
+        last_val = jax.jit(agent_state.critic_state.apply_fn)(
+            agent_state.critic_state.params, mjx_state.obs
+        )
+        advantages, targets = _gae(transitions, last_val)
+
+        B = config.batch_size
+        for _ in range(config.num_epochs):
+            rng_perm, rng_sub = jax.random.split(rng_perm)
+            perm = jax.random.permutation(rng_sub, B)
 
             def _reshape(x):
                 flat = x.reshape(B, *x.shape[2:])[perm]
                 return flat.reshape(config.num_minibatches, config.minibatch_size, *x.shape[2:])
 
-            minibatches = (
-                _reshape(transitions.obs),
-                _reshape(transitions.action),
-                _reshape(transitions.log_prob),
-                _reshape(advantages),
-                _reshape(targets),
-            )
-            agent_state, _ = jax.lax.scan(
-                lambda s, mb: (_update_minibatch(s, mb), None), agent_state, minibatches
-            )
-            return (agent_state, transitions, advantages, targets, rng), None
+            for mb in range(config.num_minibatches):
+                agent_state = _update_mb(
+                    agent_state,
+                    _reshape(transitions.obs)[mb],
+                    _reshape(transitions.action)[mb],
+                    _reshape(transitions.log_prob)[mb],
+                    _reshape(advantages)[mb],
+                    _reshape(targets)[mb],
+                )
 
-        def _gae(transitions: MjxTransition, last_value: jax.Array):
-            def _step(carry, t: MjxTransition):
-                gae, nv = carry
-                delta = t.reward + config.gamma * nv * (1 - t.done) - t.value
-                gae   = delta + config.gamma * config.gae_lambda * (1 - t.done) * gae
-                return (gae, t.value), (gae, gae + t.value)
+        total_steps += config.batch_size
+        ep_r     = np.array(transitions.ep_return)
+        mean_ret = float(np.nanmean(ep_r)) if not np.all(np.isnan(ep_r)) else float("nan")
+        elapsed  = time.perf_counter() - t0
 
-            _, (adv, tgt) = jax.lax.scan(
-                _step, (jnp.zeros_like(last_value), last_value), transitions, reverse=True
-            )
-            return adv, tgt
+        returns_by_rollout.append(mean_ret)
+        steps_by_rollout.append(total_steps)
+        time_by_rollout.append(elapsed)
 
-        def _iteration(carry, _):
-            agent_state, mjx_state, ep_buf, step_counts, rng = carry
+        if time_to_threshold < 0 and not np.isnan(mean_ret) and mean_ret >= threshold:
+            time_to_threshold  = elapsed
+            steps_to_threshold = total_steps
 
-            (agent_state, mjx_state, ep_buf, step_counts, rng), transitions = jax.lax.scan(
-                _env_step,
-                (agent_state, mjx_state, ep_buf, step_counts, rng),
-                None,
-                length=config.num_steps,
-            )
-
-            last_val = agent_state.critic_state.apply_fn(
-                agent_state.critic_state.params, mjx_state.obs
-            )
-            advantages, targets = _gae(transitions, last_val)
-
-            (agent_state, _, _, _, rng), _ = jax.lax.scan(
-                _update_epoch,
-                (agent_state, transitions, advantages, targets, rng),
-                None,
-                length=config.num_epochs,
-            )
-
-            ep_r  = transitions.ep_return
-            valid = ~jnp.isnan(ep_r)
-            n     = valid.sum()
-            mean_ep = jnp.where(n > 0, jnp.where(valid, ep_r, 0.0).sum() / jnp.maximum(n, 1), jnp.nan)
-
-            return (agent_state, mjx_state, ep_buf, step_counts, rng), mean_ep
-
-        (agent_state, _, _, _, _), ep_return_by_rollout = jax.lax.scan(
-            _iteration,
-            (agent_state, mjx_state, ep_buf, step_counts, rng),
-            None,
-            length=config.num_rollouts,
-        )
-        return agent_state, ep_return_by_rollout
-
-    return train
-
-
-def train_linen_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
-    gym_id    = MjxEnv._CONFIGS[env_id]["gym_id"]
-    threshold = _ENV_META[gym_id]["threshold"]
-
-    env      = MjxEnv(env_id)
-    train_fn = jax.jit(make_train_mjx_linen(config, env))
-
-    rng = jax.random.key(seed)
-    t0  = time.perf_counter()
-    _, ep_return_by_rollout = train_fn(rng)
-    jax.block_until_ready(ep_return_by_rollout)
+    jax.block_until_ready(mjx_state.obs)
     total_time = time.perf_counter() - t0
-
-    n  = config.num_rollouts
-    ep = np.array(ep_return_by_rollout)
-    steps_by_rollout = [config.batch_size * (i + 1) for i in range(n)]
-    time_by_rollout  = [total_time * (i + 1) / n      for i in range(n)]
-
-    time_to_threshold = -1.0; steps_to_threshold = -1
-    for i, (ret, steps) in enumerate(zip(ep, steps_by_rollout)):
-        if not np.isnan(ret) and ret >= threshold:
-            time_to_threshold = time_by_rollout[i]; steps_to_threshold = steps; break
 
     return {
         "impl": "linen", "env": gym_id, "seed": seed,
-        "returns_by_rollout":  ep.tolist(),
+        "returns_by_rollout":  returns_by_rollout,
         "steps_by_rollout":    steps_by_rollout,
         "time_by_rollout":     time_by_rollout,
         "time_to_threshold":   time_to_threshold,
         "steps_to_threshold":  steps_to_threshold,
-        "steps_per_second":    config.total_timesteps / total_time,
+        "steps_per_second":    total_steps / total_time,
         "total_time":          total_time,
     }
 

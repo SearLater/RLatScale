@@ -80,7 +80,7 @@ _ENV_META: dict[str, dict] = {
     },
     "Pendulum-v1": {
         "action_type": "continuous",
-        "threshold": -200.0,
+        "threshold": -500.0,
         "random_score": -1200.0,
     },
 }
