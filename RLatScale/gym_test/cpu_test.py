@@ -165,7 +165,7 @@ def _gae_numpy(
     T = rewards.shape[0]
     advantages = np.zeros_like(rewards)
     gae = np.zeros(rewards.shape[1], dtype=np.float32)
-    any_done = terminated | truncated
+    any_done = np.logical_or(terminated, truncated)
     for t in reversed(range(T)):
         nv = last_values if t == T - 1 else values[t + 1]
         effective_nv = np.where(truncated[t], trunc_values[t], nv)
@@ -689,15 +689,28 @@ def train_ion_gymnasium(
     rng, key_net = jax.random.split(rng)
 
     network = (
-        IonContinuousActorCritic(obs_dim, action_dim, config.hidden_dim, 2, key=key_net)
+        IonContinuousActorCritic(obs_dim, action_dim, config.hidden_dim, key=key_net)
         if is_cont else
         IonDiscreteActorCritic(obs_dim, action_dim, key=key_net)
     )
 
     n_updates = config.num_rollouts * config.num_epochs * config.num_minibatches
-    sched = optax.linear_schedule(config.lr_actor, 0.0, n_updates) if config.anneal_lr else config.lr_actor
-    tx = optax.chain(optax.clip_by_global_norm(config.max_grad_norm_actor), optax.adam(sched, eps=1e-5))
-    optimizer = ion.Optimizer(tx, network)
+    lr_a = optax.linear_schedule(config.lr_actor, 0.0, n_updates) if config.anneal_lr else config.lr_actor
+    lr_c = optax.linear_schedule(config.lr_critic, 0.0, n_updates) if config.anneal_lr else config.lr_critic
+    actor_key = ("actor", "std_raw") if is_cont else "actor"
+    optimizer = ion.Optimizer(
+        {
+            actor_key: optax.chain(
+                optax.clip_by_global_norm(config.max_grad_norm_actor),
+                optax.adam(lr_a, eps=1e-5),
+            ),
+            "critic": optax.chain(
+                optax.clip_by_global_norm(config.max_grad_norm_critic),
+                optax.adam(lr_c, eps=1e-5),
+            ),
+        },
+        network,
+    )
 
     @jax.jit
     def _update_mb(network, optimizer, obs_mb, act_mb, lp_old, adv, tgt):
@@ -744,9 +757,12 @@ def train_ion_gymnasium(
             obs_j = jnp.array(obs_np)
             rng, key = jax.random.split(rng)
 
-            act_j, lp, val = network.get_action_and_value(obs_j, key=key)
-            # step env with clipped action; store unclipped so lp_old stays consistent
-            act_env = np.array(jnp.clip(act_j, act_low, act_high)) if is_cont else np.array(act_j)
+            if is_cont:
+                act_j, lp, val = network.get_action_log_prob_value(obs_j, key=key)
+                act_env = np.array(jnp.clip(act_j, act_low, act_high))
+            else:
+                act_j, lp, val = network.get_action_and_value(obs_j, key=key)
+                act_env = np.array(act_j)
 
             obs_next, rew, term, trunc, info = envs.step(act_env)
             done = (term | trunc).astype(np.float32)

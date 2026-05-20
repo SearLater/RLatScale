@@ -561,15 +561,28 @@ def train_ion_gymnax(config: Config, env_id: str, seed: int) -> dict:
     rng, key_net = jax.random.split(rng)
 
     network = (
-        IonContinuousActorCritic(obs_dim, action_dim, config.hidden_dim, 2, key=key_net)
+        IonContinuousActorCritic(obs_dim, action_dim, config.hidden_dim, key=key_net)
         if is_cont else
         IonDiscreteActorCritic(obs_dim, action_dim, key=key_net)
     )
 
     total_updates = config.num_rollouts * config.num_epochs * config.num_minibatches
-    sched = optax.linear_schedule(config.lr_actor, 0.0, total_updates) if config.anneal_lr else config.lr_actor
-    tx = optax.chain(optax.clip_by_global_norm(config.max_grad_norm_actor), optax.adam(sched, eps=1e-5))
-    optimizer = ion.Optimizer(tx, network)
+    lr_a = optax.linear_schedule(config.lr_actor, 0.0, total_updates) if config.anneal_lr else config.lr_actor
+    lr_c = optax.linear_schedule(config.lr_critic, 0.0, total_updates) if config.anneal_lr else config.lr_critic
+    actor_key = ("actor", "std_raw") if is_cont else "actor"
+    optimizer = ion.Optimizer(
+        {
+            actor_key: optax.chain(
+                optax.clip_by_global_norm(config.max_grad_norm_actor),
+                optax.adam(lr_a, eps=1e-5),
+            ),
+            "critic": optax.chain(
+                optax.clip_by_global_norm(config.max_grad_norm_critic),
+                optax.adam(lr_c, eps=1e-5),
+            ),
+        },
+        network,
+    )
 
     rng, rng_reset = jax.random.split(rng)
     obs, env_state = jax.vmap(env.reset, in_axes=(0, None))(
@@ -584,7 +597,10 @@ def train_ion_gymnax(config: Config, env_id: str, seed: int) -> dict:
             obs, env_state, ep_buf, rng = carry
             rng, rng_act, rng_step = jax.random.split(rng, 3)
 
-            action, log_prob, value = network.get_action_and_value(obs, key=rng_act)
+            if is_cont:
+                action, log_prob, value = network.get_action_log_prob_value(obs, key=rng_act)
+            else:
+                action, log_prob, value = network.get_action_and_value(obs, key=rng_act)
             # step env with clipped; store unclipped so lp_old stays consistent
             action_env = jnp.clip(action, act_low, act_high) if is_cont else action
 

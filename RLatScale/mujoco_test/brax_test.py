@@ -469,12 +469,24 @@ def train_ion_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
     rng = jax.random.key(seed)
     rng, key_net = jax.random.split(rng)
 
-    network = IonContinuousActorCritic(obs_dim, action_dim, config.hidden_dim, 2, key=key_net)
+    network = IonContinuousActorCritic(obs_dim, action_dim, config.hidden_dim, key=key_net)
 
     total_updates = config.num_rollouts * config.num_epochs * config.num_minibatches
-    sched = optax.linear_schedule(config.lr_actor, 0.0, total_updates) if config.anneal_lr else config.lr_actor
-    tx = optax.chain(optax.clip_by_global_norm(config.max_grad_norm_actor), optax.adam(sched, eps=1e-5))
-    optimizer = ion.Optimizer(tx, network)
+    lr_a = optax.linear_schedule(config.lr_actor, 0.0, total_updates) if config.anneal_lr else config.lr_actor
+    lr_c = optax.linear_schedule(config.lr_critic, 0.0, total_updates) if config.anneal_lr else config.lr_critic
+    optimizer = ion.Optimizer(
+        {
+            ("actor", "std_raw"): optax.chain(
+                optax.clip_by_global_norm(config.max_grad_norm_actor),
+                optax.adam(lr_a, eps=1e-5),
+            ),
+            "critic": optax.chain(
+                optax.clip_by_global_norm(config.max_grad_norm_critic),
+                optax.adam(lr_c, eps=1e-5),
+            ),
+        },
+        network,
+    )
 
     jit_reset = jax.jit(jax.vmap(env.reset))
     jit_step  = jax.jit(jax.vmap(env.step))
@@ -493,7 +505,7 @@ def train_ion_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
             obs = brax_state.obs
             rng, rng_act = jax.random.split(rng)
 
-            action, log_prob, value = network.get_action_and_value(obs, key=rng_act)
+            action, log_prob, value = network.get_action_log_prob_value(obs, key=rng_act)
             # step env with clipped; store unclipped so lp_old stays consistent
             step_counts = step_counts + 1
             brax_state  = jit_step(brax_state, jnp.clip(action, -1.0, 1.0))

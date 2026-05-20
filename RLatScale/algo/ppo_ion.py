@@ -9,11 +9,13 @@ import jax.numpy as jnp
 import numpy as np
 import optax
 from jaxtyping import Array, Bool, Float, Int, PRNGKeyArray
+from jax.nn.initializers import orthogonal
 from tqdm import tqdm
-
 import ion
 from ion import nn
 from ion.nn.param import Param
+
+from RLatScale.algo.distributions import Normal
 
 
 class ActorCritic(nn.Module):
@@ -68,63 +70,62 @@ class ActorCritic(nn.Module):
         value = self.critic(observations).squeeze(-1)
         return log_prob, entropy, value
     
-class ActorCriticContinuous(ActorCritic):
-    """Actor-critic network for continuous action spaces using a diagonal Gaussian policy."""
-    actor: nn.MLP
-    critic: nn.MLP
-    log_std: Float[Array, "a"]
+class ActorCriticContinuous(nn.Module):
+    """Actor-critic network for continuous action spaces."""
+
+    actor: nn.Sequential
+    critic: nn.Sequential
+    std_raw: nn.Param
 
     def __init__(
         self,
-        observation_dim: int,
+        obs_dim: int,
         action_dim: int,
         hidden_dim: int = 64,
-        hidden_layers: int = 2,
-        activation: Array = jax.nn.tanh,
         *,
         key: PRNGKeyArray,
     ) -> None:
-        key_a, key_c = jax.random.split(key)
-        actor_mlp = nn.MLP(observation_dim, action_dim, hidden_dim, hidden_layers, activation, key=key_a)
-        # Scale output layer to 0.01 so initial means are near-zero (matches RecurrentActorCriticContinuous)
-        last = actor_mlp.layers[-1]
-        self.actor = actor_mlp.replace(
-            layers=(*actor_mlp.layers[:-1], last.replace(w=Param(last.w._value * 0.01)))
+        keys = jax.random.split(key, 6)
+        self.actor = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim, w_init=orthogonal(scale=2**0.5), key=keys[0]),
+            jax.nn.tanh,
+            nn.Linear(hidden_dim, hidden_dim, w_init=orthogonal(scale=2**0.5), key=keys[1]),
+            jax.nn.tanh,
+            nn.Linear(hidden_dim, action_dim, w_init=orthogonal(scale=0.01), key=keys[2]),
         )
-        self.critic = nn.MLP(observation_dim, 1, hidden_dim, hidden_layers, activation, key=key_c)
-        self.log_std = jnp.full((action_dim,), -2.0)
+        self.critic = nn.Sequential(
+            nn.Linear(obs_dim, hidden_dim, w_init=orthogonal(scale=2**0.5), key=keys[3]),
+            jax.nn.tanh,
+            nn.Linear(hidden_dim, hidden_dim, w_init=orthogonal(scale=2**0.5), key=keys[4]),
+            jax.nn.tanh,
+            nn.Linear(hidden_dim, 1, w_init=orthogonal(scale=1.0), key=keys[5]),
+        )
+        self.std_raw = nn.Param(jnp.zeros(action_dim))
 
-    def _distribution(self, observations: Float[Array, "... d"]) -> tuple[Float[Array, "... a"], Float[Array, "a"]]:
-        return self.actor(observations), jnp.clip(self.log_std, -20.0, 2.0)
-
-    def get_actions(
+    def get_action(
         self,
         observations: Float[Array, "... d"],
         *,
         key: PRNGKeyArray,
     ) -> Float[Array, "... a"]:
-        "Sample actions from the Gaussian policy"
-        mean, log_std = self._distribution(observations)
-        return mean + jax.random.normal(key, shape=mean.shape) * jnp.exp(log_std)
+        """Sample actions from the policy."""
+        dist = Normal(mean=self.actor(observations), std=jax.nn.softplus(self.std_raw) + 1e-6)
+        return dist.sample(key=key)
 
-    def get_value(
-        self,
-        observations: Float[Array, "... d"],
-    ) -> Float[Array, "..."]:
-        "Estimate state value"
+    def get_value(self, observations: Float[Array, "... d"]) -> Float[Array, "..."]:
+        """Estimate state value."""
         return self.critic(observations).squeeze(-1)
 
-    def get_action_and_value(
+    def get_action_log_prob_value(
         self,
         observations: Float[Array, "... d"],
         *,
         key: PRNGKeyArray,
     ) -> tuple[Float[Array, "... a"], Float[Array, "..."], Float[Array, "..."]]:
-        "Sample action, compute log prob and value estimate"
-        mean, log_std = self._distribution(observations)
-        std = jnp.exp(log_std) + 1e-8
-        action = mean + jax.random.normal(key, shape=mean.shape) * std
-        log_prob = -0.5 * jnp.sum(((action - mean) / std) ** 2 + 2.0 * log_std + jnp.log(2.0 * jnp.pi), axis=-1)
+        """Sample action, compute its log-prob and value estimate."""
+        dist = Normal(mean=self.actor(observations), std=jax.nn.softplus(self.std_raw) + 1e-6)
+        action = dist.sample(key=key)
+        log_prob = dist.log_prob(action)
         value = self.critic(observations).squeeze(-1)
         return action, log_prob, value
 
@@ -133,14 +134,12 @@ class ActorCriticContinuous(ActorCritic):
         observations: Float[Array, "... d"],
         action: Float[Array, "... a"],
     ) -> tuple[Float[Array, "..."], Float[Array, "..."], Float[Array, "..."]]:
-        "Compute action log-prob, entropy and value estimate"
-        mean, log_std = self._distribution(observations)
-        std = jnp.exp(log_std) + 1e-8
-        log_prob = -0.5 * jnp.sum(((action - mean) / std) ** 2 + 2.0 * log_std + jnp.log(2.0 * jnp.pi), axis=-1)
-        entropy = jnp.sum(0.5 * (1.0 + jnp.log(2.0 * jnp.pi)) + log_std, axis=-1)
+        """Compute action log-prob, entropy, and value estimate."""
+        dist = Normal(mean=self.actor(observations), std=jax.nn.softplus(self.std_raw) + 1e-6)
+        log_prob = dist.log_prob(action)
+        entropy = dist.entropy
         value = self.critic(observations).squeeze(-1)
         return log_prob, entropy, value
-
 
 class Transition(NamedTuple):
     observations: Float[Array, "... d"]

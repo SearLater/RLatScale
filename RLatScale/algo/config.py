@@ -16,13 +16,13 @@ class Config:
     num_minibatches: int = 4   # batch=512, minibatch=128
     hidden_dim: int = 64
     lr_actor: float = 2.5e-4   # CleanRL standard for simple envs
-    lr_critic: float = 2.5e-4  # unified with actor; no benefit to gap for CartPole/Pendulum
+    lr_critic: float = 1e-3      # critic learns faster than actor; matches CleanRL continuous
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_eps: float = 0.2
     entropy_beta: float = 0.01
     max_grad_norm_actor: float = 0.5
-    max_grad_norm_critic: float = 0.5  # was 10.0; standard value matches actor
+    max_grad_norm_critic: float = 10.0  # critic needs larger gradient steps early in training
     advantage_norm: bool = True
     anneal_lr: bool = True
     seed: int = 42
@@ -89,7 +89,7 @@ class MuJoCoConfig(Config):
     num_epochs: int = 10
     num_minibatches: int = 32
     lr_actor: float = 3e-4
-    lr_critic: float = 3e-4
+    lr_critic: float = 1e-3
     entropy_beta: float = 0.0
     num_seeds: int = 3
     envs: tuple[str, ...] = ("HalfCheetah-v4", "Ant-v4")
@@ -116,7 +116,7 @@ class BraxConfig(Config):
     num_epochs: int = 4
     num_minibatches: int = 32
     lr_actor: float = 3e-4
-    lr_critic: float = 3e-4
+    lr_critic: float = 1e-3
     entropy_beta: float = 0.0
     num_seeds: int = 3
     envs: tuple[str, ...] = ("halfcheetah", "ant")
@@ -143,7 +143,7 @@ class MjxConfig(Config):
     num_epochs: int = 10
     num_minibatches: int = 32
     lr_actor: float = 3e-4
-    lr_critic: float = 3e-4
+    lr_critic: float = 1e-3
     entropy_beta: float = 0.0
     num_seeds: int = 3
     envs: tuple[str, ...] = ("halfcheetah", "ant")
