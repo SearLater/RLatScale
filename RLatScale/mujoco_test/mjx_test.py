@@ -265,7 +265,7 @@ def train_linen_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
         def _env_step(carry, _):
             mjx_state, ep_buf, step_counts, rng = carry
             obs = mjx_state.obs
-            rng, rng_act = jax.random.split(rng)
+            rng, rng_act, rng_reset = jax.random.split(rng, 3)
             mean, log_std = agent_state.actor_state.apply_fn(
                 agent_state.actor_state.params, obs
             )
@@ -275,13 +275,23 @@ def train_linen_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
             value    = agent_state.critic_state.apply_fn(
                 agent_state.critic_state.params, obs
             )
-            step_counts = step_counts + 1
-            mjx_state   = vmapped_step(mjx_state, action, step_counts)
-            reward = mjx_state.reward
-            done   = mjx_state.done.astype(jnp.float32)
-            ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
-            ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
-            step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
+            step_counts   = step_counts + 1
+            mjx_state_new = vmapped_step(mjx_state, action, step_counts)
+            reward    = mjx_state_new.reward
+            done_bool = mjx_state_new.done
+            done      = done_bool.astype(jnp.float32)
+            reset_state = vmapped_reset(jax.random.split(rng_reset, config.num_envs))
+            def _sel(r, s):
+                return jnp.where(done_bool.reshape((-1,) + (1,) * (r.ndim - 1)), r, s)
+            mjx_state = MjxState(
+                mjx_data=jax.tree_util.tree_map(_sel, reset_state.mjx_data, mjx_state_new.mjx_data),
+                obs=_sel(reset_state.obs, mjx_state_new.obs),
+                reward=mjx_state_new.reward,
+                done=mjx_state_new.done,
+            )
+            ep_return  = jnp.where(done_bool, ep_buf + reward, jnp.nan)
+            ep_buf_new = jnp.where(done_bool, 0.0, ep_buf + reward)
+            step_counts = jnp.where(done_bool, 0, step_counts)
             t = MjxTransition(obs, action, reward, done, log_prob, value, ep_return)
             return (mjx_state, ep_buf_new, step_counts, rng), t
 
@@ -445,7 +455,7 @@ def train_nnx_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
         def _env_step(carry, _):
             mjx_state, ep_buf, step_counts, rng = carry
             obs = mjx_state.obs
-            rng, rng_act = jax.random.split(rng)
+            rng, rng_act, rng_reset = jax.random.split(rng, 3)
 
             mean, log_std = nnx.merge(graphdef_a, state_a)(obs)
             noise  = jax.random.normal(rng_act, mean.shape)
@@ -453,14 +463,25 @@ def train_nnx_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
             log_prob = _normal_log_prob(action, mean, log_std)
             value    = nnx.merge(graphdef_c, state_c)(obs)
 
-            step_counts = step_counts + 1
-            mjx_state   = vmapped_step(mjx_state, action, step_counts)
-            reward = mjx_state.reward
-            done   = mjx_state.done.astype(jnp.float32)
+            step_counts   = step_counts + 1
+            mjx_state_new = vmapped_step(mjx_state, action, step_counts)
+            reward    = mjx_state_new.reward
+            done_bool = mjx_state_new.done
+            done      = done_bool.astype(jnp.float32)
 
-            ep_return   = jnp.where(done, ep_buf + reward, jnp.nan)
-            ep_buf_new  = jnp.where(done, 0.0, ep_buf + reward)
-            step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
+            reset_state = vmapped_reset(jax.random.split(rng_reset, config.num_envs))
+            def _sel(r, s):
+                return jnp.where(done_bool.reshape((-1,) + (1,) * (r.ndim - 1)), r, s)
+            mjx_state = MjxState(
+                mjx_data=jax.tree_util.tree_map(_sel, reset_state.mjx_data, mjx_state_new.mjx_data),
+                obs=_sel(reset_state.obs, mjx_state_new.obs),
+                reward=mjx_state_new.reward,
+                done=mjx_state_new.done,
+            )
+
+            ep_return   = jnp.where(done_bool, ep_buf + reward, jnp.nan)
+            ep_buf_new  = jnp.where(done_bool, 0.0, ep_buf + reward)
+            step_counts = jnp.where(done_bool, 0, step_counts)
 
             t = MjxTransition(obs, action, reward, done, log_prob, value, ep_return)
             return (mjx_state, ep_buf_new, step_counts, rng), t
@@ -626,18 +647,30 @@ def train_ion_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
         def _env_step(carry, _):
             mjx_state, ep_buf, step_counts, rng = carry
             obs = mjx_state.obs
-            rng, rng_act = jax.random.split(rng)
+            rng, rng_act, rng_reset = jax.random.split(rng, 3)
 
             action, log_prob, value = network.get_action_log_prob_value(obs, key=rng_act)
             # step env with clipped; store unclipped so lp_old stays consistent
-            step_counts = step_counts + 1
-            mjx_state   = vmapped_step(mjx_state, jnp.clip(action, -1.0, 1.0), step_counts)
-            reward = mjx_state.reward
-            done   = mjx_state.done.astype(jnp.float32)
+            step_counts   = step_counts + 1
+            mjx_state_new = vmapped_step(mjx_state, jnp.clip(action, -1.0, 1.0), step_counts)
+            reward    = mjx_state_new.reward
+            done_bool = mjx_state_new.done
+            done      = done_bool.astype(jnp.float32)
 
-            ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
-            ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
-            step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
+            # Auto-reset: replace terminal physics states with fresh random initializations
+            reset_state = vmapped_reset(jax.random.split(rng_reset, config.num_envs))
+            def _sel(r, s):
+                return jnp.where(done_bool.reshape((-1,) + (1,) * (r.ndim - 1)), r, s)
+            mjx_state = MjxState(
+                mjx_data=jax.tree_util.tree_map(_sel, reset_state.mjx_data, mjx_state_new.mjx_data),
+                obs=_sel(reset_state.obs, mjx_state_new.obs),
+                reward=mjx_state_new.reward,
+                done=mjx_state_new.done,
+            )
+
+            ep_return  = jnp.where(done_bool, ep_buf + reward, jnp.nan)
+            ep_buf_new = jnp.where(done_bool, 0.0, ep_buf + reward)
+            step_counts = jnp.where(done_bool, 0, step_counts)
 
             t = MjxTransition(obs, action, reward, done, log_prob, value, ep_return)
             return (mjx_state, ep_buf_new, step_counts, rng), t

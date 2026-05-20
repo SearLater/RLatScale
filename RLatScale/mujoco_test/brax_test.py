@@ -149,7 +149,7 @@ def train_linen_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
             step_counts = step_counts + 1
             brax_state  = jit_step(brax_state, action)
             reward = brax_state.reward
-            done   = (brax_state.done | (step_counts >= episode_length)).astype(jnp.float32)
+            done   = jnp.logical_or(brax_state.done, step_counts >= episode_length).astype(jnp.float32)
             ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
             ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
             step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
@@ -331,7 +331,7 @@ def train_nnx_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
             step_counts = step_counts + 1
             brax_state  = jit_step(brax_state, action)
             reward = brax_state.reward
-            done   = (brax_state.done | (step_counts >= episode_length)).astype(jnp.float32)
+            done   = jnp.logical_or(brax_state.done, step_counts >= episode_length).astype(jnp.float32)
 
             ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
             ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
@@ -510,7 +510,7 @@ def train_ion_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
             step_counts = step_counts + 1
             brax_state  = jit_step(brax_state, jnp.clip(action, -1.0, 1.0))
             reward = brax_state.reward
-            done   = (brax_state.done | (step_counts >= episode_length)).astype(jnp.float32)
+            done   = jnp.logical_or(brax_state.done, step_counts >= episode_length).astype(jnp.float32)
 
             ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
             ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
