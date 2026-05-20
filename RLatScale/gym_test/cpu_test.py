@@ -148,20 +148,24 @@ def _normal_entropy(log_std: jax.Array) -> jax.Array:
 # ---------------------------------------------------------------------------
 
 def _gae_numpy(
-    rewards: np.ndarray,     # (T, num_envs)
-    values: np.ndarray,      # (T, num_envs)
-    dones: np.ndarray,       # (T, num_envs)
-    last_values: np.ndarray, # (num_envs,)
+    rewards: np.ndarray,       # (T, num_envs)
+    values: np.ndarray,        # (T, num_envs)
+    terminated: np.ndarray,    # (T, num_envs) — true terminal, not truncation
+    truncated: np.ndarray,     # (T, num_envs)
+    trunc_values: np.ndarray,  # (T, num_envs) — V(final_obs) when truncated, else 0
+    last_values: np.ndarray,   # (num_envs,)
     gamma: float,
     gae_lambda: float,
 ) -> tuple[np.ndarray, np.ndarray]:
     T = rewards.shape[0]
     advantages = np.zeros_like(rewards)
     gae = np.zeros(rewards.shape[1], dtype=np.float32)
+    any_done = terminated | truncated
     for t in reversed(range(T)):
         nv = last_values if t == T - 1 else values[t + 1]
-        delta = rewards[t] + gamma * nv * (1.0 - dones[t]) - values[t]
-        gae = delta + gamma * gae_lambda * (1.0 - dones[t]) * gae
+        effective_nv = np.where(truncated[t], trunc_values[t], nv)
+        delta = rewards[t] + gamma * effective_nv * (1.0 - terminated[t]) - values[t]
+        gae = delta + gamma * gae_lambda * (1.0 - any_done[t]) * gae
         advantages[t] = gae
     return advantages, advantages + values
 
@@ -326,9 +330,6 @@ def train_linen_gymnasium(
 
     @jax.jit
     def _update_mb(a_st, c_st, obs_mb, act_mb, lp_old, adv, tgt):
-        if config.advantage_norm:
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
         def actor_loss(params):
             if is_cont:
                 mean, log_std = a_st.apply_fn(params, obs_mb)
@@ -371,10 +372,12 @@ def train_linen_gymnasium(
         O  = np.zeros((T, N, obs_dim),  np.float32)
         A  = np.zeros((T, N, action_dim) if is_cont else (T, N),
                       np.float32 if is_cont else np.int32)
-        R  = np.zeros((T, N),            np.float32)
-        D  = np.zeros((T, N),            np.float32)
-        LP = np.zeros((T, N),            np.float32)
-        V  = np.zeros((T, N),            np.float32)
+        R       = np.zeros((T, N),            np.float32)
+        TERM    = np.zeros((T, N),            np.float32)
+        TRUNC   = np.zeros((T, N),            np.float32)
+        TRUNC_V = np.zeros((T, N),            np.float32)
+        LP      = np.zeros((T, N),            np.float32)
+        V       = np.zeros((T, N),            np.float32)
 
         for t in range(T):
             obs_j = jnp.array(obs_np)
@@ -393,11 +396,18 @@ def train_linen_gymnasium(
                 act_np = np.array(act_j)
 
             val = critic_st.apply_fn(critic_st.params, obs_j)
-            obs_next, rew, term, trunc, _ = envs.step(act_np)
+            obs_next, rew, term, trunc, info = envs.step(act_np)
             done = (term | trunc).astype(np.float32)
 
+            trunc_val_t = np.zeros(N, np.float32)
+            if np.any(trunc):
+                final_obs = info.get("final_observation", obs_next)
+                v_fin = np.array(critic_st.apply_fn(critic_st.params, jnp.array(final_obs)))
+                trunc_val_t = np.where(trunc, v_fin, 0.0)
+
             O[t] = obs_np; A[t] = act_np; R[t] = rew
-            D[t] = done;   LP[t] = np.array(lp); V[t] = np.array(val)
+            TERM[t] = term.astype(np.float32); TRUNC[t] = trunc.astype(np.float32)
+            TRUNC_V[t] = trunc_val_t; LP[t] = np.array(lp); V[t] = np.array(val)
 
             ep_buf += rew
             for i in range(N):
@@ -408,7 +418,7 @@ def train_linen_gymnasium(
 
         total_steps += config.batch_size
         last_val = np.array(critic_st.apply_fn(critic_st.params, jnp.array(obs_np)))
-        adv_all, tgt_all = _gae_numpy(R, V, D, last_val, config.gamma, config.gae_lambda)
+        adv_all, tgt_all = _gae_numpy(R, V, TERM, TRUNC, TRUNC_V, last_val, config.gamma, config.gae_lambda)
 
         B    = config.batch_size
         O_f  = O.reshape(B, obs_dim)
@@ -416,6 +426,8 @@ def train_linen_gymnasium(
         LP_f = LP.reshape(B)
         adv_f = adv_all.reshape(B)
         tgt_f = tgt_all.reshape(B)
+        if config.advantage_norm:
+            adv_f = (adv_f - adv_f.mean()) / (adv_f.std() + 1e-8)
 
         for _ in range(config.num_epochs):
             perm = rng_np.permutation(B)
@@ -507,9 +519,6 @@ def train_nnx_gymnasium(
 
     @nnx.jit
     def _update_mb(actor, critic, actor_opt, critic_opt, obs_mb, act_mb, lp_old, adv, tgt):
-        if config.advantage_norm:
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
         def actor_loss(actor):
             if is_cont:
                 mean, log_std = actor(obs_mb)
@@ -550,10 +559,12 @@ def train_nnx_gymnasium(
         O  = np.zeros((T, N, obs_dim),  np.float32)
         A  = np.zeros((T, N, action_dim) if is_cont else (T, N),
                       np.float32 if is_cont else np.int32)
-        R  = np.zeros((T, N),            np.float32)
-        D  = np.zeros((T, N),            np.float32)
-        LP = np.zeros((T, N),            np.float32)
-        V  = np.zeros((T, N),            np.float32)
+        R       = np.zeros((T, N),            np.float32)
+        TERM    = np.zeros((T, N),            np.float32)
+        TRUNC   = np.zeros((T, N),            np.float32)
+        TRUNC_V = np.zeros((T, N),            np.float32)
+        LP      = np.zeros((T, N),            np.float32)
+        V       = np.zeros((T, N),            np.float32)
 
         for t in range(T):
             obs_j = jnp.array(obs_np)
@@ -573,11 +584,18 @@ def train_nnx_gymnasium(
                 lp     = _cat_log_prob(logits, act_j)
                 act_np = np.array(act_j)
 
-            obs_next, rew, term, trunc, _ = envs.step(act_np)
+            obs_next, rew, term, trunc, info = envs.step(act_np)
             done = (term | trunc).astype(np.float32)
 
+            trunc_val_t = np.zeros(N, np.float32)
+            if np.any(trunc):
+                final_obs = info.get("final_observation", obs_next)
+                _, v_fin = _forward(actor, critic, jnp.array(final_obs))
+                trunc_val_t = np.where(trunc, np.array(v_fin), 0.0)
+
             O[t] = obs_np; A[t] = act_np; R[t] = rew
-            D[t] = done;   LP[t] = np.array(lp); V[t] = np.array(val)
+            TERM[t] = term.astype(np.float32); TRUNC[t] = trunc.astype(np.float32)
+            TRUNC_V[t] = trunc_val_t; LP[t] = np.array(lp); V[t] = np.array(val)
 
             ep_buf += rew
             for i in range(N):
@@ -588,7 +606,7 @@ def train_nnx_gymnasium(
 
         total_steps += config.batch_size
         _, last_val = _forward(actor, critic, jnp.array(obs_np))
-        adv_all, tgt_all = _gae_numpy(R, V, D, np.array(last_val), config.gamma, config.gae_lambda)
+        adv_all, tgt_all = _gae_numpy(R, V, TERM, TRUNC, TRUNC_V, np.array(last_val), config.gamma, config.gae_lambda)
 
         B    = config.batch_size
         O_f  = O.reshape(B, obs_dim)
@@ -596,6 +614,8 @@ def train_nnx_gymnasium(
         LP_f = LP.reshape(B)
         adv_f = adv_all.reshape(B)
         tgt_f = tgt_all.reshape(B)
+        if config.advantage_norm:
+            adv_f = (adv_f - adv_f.mean()) / (adv_f.std() + 1e-8)
 
         for _ in range(config.num_epochs):
             perm = rng_np.permutation(B)

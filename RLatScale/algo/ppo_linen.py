@@ -172,13 +172,6 @@ def make_train(config: Config, env, env_params):
         def _update_minibatch(agent_state: AgentState, mb) -> AgentState:
             obs_mb, act_mb, lp_old_mb, adv_mb, tgt_mb = mb
 
-            adv_mb = jax.lax.cond(
-                config.advantage_norm,
-                lambda a: (a - a.mean()) / (a.std() + 1e-8),
-                lambda a: a,
-                adv_mb,
-            )
-
             def actor_loss_fn(params):
                 logits = agent_state.actor_state.apply_fn(params, obs_mb)
                 lp = _log_prob(logits, act_mb)
@@ -206,7 +199,8 @@ def make_train(config: Config, env, env_params):
         def _update_epoch(carry, _):
             agent_state, transitions, advantages, targets, rng = carry
             rng, rng_perm = jax.random.split(rng)
-
+            if config.advantage_norm:
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             B = config.batch_size
             perm = jax.random.permutation(rng_perm, B)
 

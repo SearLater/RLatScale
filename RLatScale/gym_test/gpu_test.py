@@ -154,13 +154,6 @@ def make_train_gymnax_linen(
         def _update_minibatch(agent_state: AgentState, mb) -> AgentState:
             obs_mb, act_mb, lp_old_mb, adv_mb, tgt_mb = mb
 
-            adv_mb = jax.lax.cond(
-                config.advantage_norm,
-                lambda a: (a - a.mean()) / (a.std() + 1e-8),
-                lambda a: a,
-                adv_mb,
-            )
-
             def actor_loss_fn(params):
                 if is_cont:
                     mean, log_std = agent_state.actor_state.apply_fn(params, obs_mb)
@@ -195,6 +188,8 @@ def make_train_gymnax_linen(
         def _update_epoch(carry, _):
             agent_state, transitions, advantages, targets, rng = carry
             rng, rng_perm = jax.random.split(rng)
+            if config.advantage_norm:
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
             B = config.batch_size
             perm = jax.random.permutation(rng_perm, B)
 
@@ -428,9 +423,6 @@ def train_nnx_gymnax(config: Config, env_id: str, seed: int) -> dict:
 
     @nnx.jit
     def _update_mb(actor, critic, actor_opt, critic_opt, obs_mb, act_mb, lp_old, adv, tgt):
-        if config.advantage_norm:
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
         def actor_loss(actor):
             if is_cont:
                 mean, log_std = actor(obs_mb)
@@ -480,6 +472,8 @@ def train_nnx_gymnax(config: Config, env_id: str, seed: int) -> dict:
         )
         last_val = nnx.jit(critic)(obs)
         advantages, targets = _gae(transitions, last_val)
+        if config.advantage_norm:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         B = config.batch_size
         for _ in range(config.num_epochs):

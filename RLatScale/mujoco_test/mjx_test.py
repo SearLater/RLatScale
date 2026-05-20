@@ -246,10 +246,15 @@ def train_linen_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
     vmapped_reset = jax.vmap(env.reset)
     vmapped_step  = jax.vmap(env.step)
 
-    rng, rng_reset = jax.random.split(rng)
+    rng, rng_reset, rng_sc = jax.random.split(rng, 3)
     mjx_state   = vmapped_reset(jax.random.split(rng_reset, config.num_envs))
     ep_buf      = jnp.zeros(config.num_envs)
-    step_counts = jnp.zeros(config.num_envs, dtype=jnp.int32)
+    # Stagger initial step counts uniformly across [0, episode_length) so that
+    # episode completions are spread across rollouts rather than all hitting at
+    # rollout 100 (with num_steps=10 and episode_len=1000).
+    step_counts = jax.random.randint(
+        rng_sc, (config.num_envs,), 0, env.episode_length, dtype=jnp.int32
+    )
 
     @jax.jit
     def _collect_rollout(agent_state, mjx_state, ep_buf, step_counts, rng):
@@ -283,9 +288,6 @@ def train_linen_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
 
     @jax.jit
     def _update_mb(agent_state, obs_mb, act_mb, lp_old_mb, adv_mb, tgt_mb):
-        if config.advantage_norm:
-            adv_mb = (adv_mb - adv_mb.mean()) / (adv_mb.std() + 1e-8)
-
         def actor_loss_fn(params):
             mean, log_std = agent_state.actor_state.apply_fn(params, obs_mb)
             lp  = _normal_log_prob(act_mb, mean, log_std)
@@ -340,6 +342,8 @@ def train_linen_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
             agent_state.critic_state.params, mjx_state.obs
         )
         advantages, targets = _gae(transitions, last_val)
+        if config.advantage_norm:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         B = config.batch_size
         for _ in range(config.num_epochs):
@@ -420,10 +424,12 @@ def train_nnx_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
     vmapped_reset = jax.vmap(env.reset)
     vmapped_step  = jax.vmap(env.step)
 
-    rng, rng_reset = jax.random.split(rng)
+    rng, rng_reset, rng_sc = jax.random.split(rng, 3)
     mjx_state   = vmapped_reset(jax.random.split(rng_reset, config.num_envs))
     ep_buf      = jnp.zeros(config.num_envs)
-    step_counts = jnp.zeros(config.num_envs, dtype=jnp.int32)
+    step_counts = jax.random.randint(
+        rng_sc, (config.num_envs,), 0, env.episode_length, dtype=jnp.int32
+    )
 
     def _collect_rollout(actor, critic, mjx_state, ep_buf, step_counts, rng):
         graphdef_a, state_a = nnx.split(actor)
@@ -464,9 +470,6 @@ def train_nnx_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
 
     @nnx.jit
     def _update_mb(actor, critic, actor_opt, critic_opt, obs_mb, act_mb, lp_old, adv, tgt):
-        if config.advantage_norm:
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
         def actor_loss(actor):
             mean, log_std = actor(obs_mb)
             lp  = _normal_log_prob(act_mb, mean, log_std)
@@ -511,6 +514,8 @@ def train_nnx_mjx(config: MjxConfig, env_id: str, seed: int) -> dict:
         )
         last_val   = nnx.jit(critic)(mjx_state.obs)
         advantages, targets = _gae(transitions, last_val)
+        if config.advantage_norm:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         B = config.batch_size
         for _ in range(config.num_epochs):

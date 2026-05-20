@@ -34,7 +34,7 @@ class Config:
     # tuple used (not list) so Config remains hashable for jax.tree_util.register_static
     num_seeds: int = 1
     envs: tuple[str, ...] = ("CartPole-v1", "Pendulum-v1")
-    impls: tuple[str, ...] = ("linen", "nnx")
+    impls: tuple[str, ...] = ("nnx",)
     results_dir: str = "results"
     # Leave empty to auto-detect from JAX backend + system info.
     # Set explicitly to label runs (e.g. "m3_8gb", "4090_pcie") when
@@ -68,7 +68,7 @@ class GPUConfig(Config):
     num_envs: int = 2048
     num_steps: int = 128
     num_minibatches: int = 8
-    num_seeds: int = 3
+    num_seeds: int = 1
 
 
 @jax.tree_util.register_static
@@ -89,38 +89,61 @@ class MuJoCoConfig(Config):
     lr_actor: float = 3e-4
     lr_critic: float = 3e-4
     entropy_beta: float = 0.0
-    num_seeds: int = 5
+    num_seeds: int = 3
     envs: tuple[str, ...] = ("HalfCheetah-v4", "Ant-v4")
+    impls: tuple[str, ...] = ("nnx",)
+    hardware_tag: str = "4090"
 
 
 @jax.tree_util.register_static
 @dataclass
-class BraxConfig(GPUConfig):
-    """Brax JAX-native GPU config.
+class BraxConfig(Config):
+    """Brax JAX-native GPU config tuned for RTX 4090.
 
-    batch_size   = 2048 * 10 = 20_480
-    minibatch    = 20_480 // 8 = 2_560
-    num_rollouts = 2_000_000 // 20_480 ≈ 97
+    Brax is lightweight so more envs fit; num_steps=64 gives a proper
+    GAE horizon without sacrificing throughput on 4090 VRAM.
+
+    batch_size   = 4096 * 64  = 262_144
+    minibatch    = 262_144 // 32 = 8_192
+    num_rollouts = 50_000_000 // 262_144 ≈ 190
     """
 
-    total_timesteps: int = 2_000_000
-    num_steps: int = 10
-    num_seeds: int = 5
+    total_timesteps: int = 50_000_000
+    num_envs: int = 4096
+    num_steps: int = 64
+    num_epochs: int = 4
+    num_minibatches: int = 32
+    lr_actor: float = 3e-4
+    lr_critic: float = 3e-4
+    entropy_beta: float = 0.0
+    num_seeds: int = 3
     envs: tuple[str, ...] = ("halfcheetah", "ant")
     results_dir: str = "results/brax"
+    hardware_tag: str = "4090"
 
 
 @jax.tree_util.register_static
 @dataclass
-class MjxConfig(GPUConfig):
-    """MJX (mujoco.mjx) JAX-native GPU config.
+class MjxConfig(Config):
+    """MJX (mujoco.mjx) JAX-native GPU config tuned for RTX 4090.
 
-    Same batch geometry as BraxConfig; separate class so results are
-    stored under a distinct hardware/impl tag.
+    MJX is heavier than Brax so fewer envs; same batch geometry as
+    BraxConfig for a clean apples-to-apples throughput comparison.
+
+    batch_size   = 2048 * 128 = 262_144
+    minibatch    = 262_144 // 32 = 8_192
+    num_rollouts = 50_000_000 // 262_144 ≈ 190
     """
 
-    total_timesteps: int = 2_000_000
-    num_steps: int = 10
-    num_seeds: int = 5
+    total_timesteps: int = 50_000_000
+    num_envs: int = 2048
+    num_steps: int = 128
+    num_epochs: int = 10
+    num_minibatches: int = 32
+    lr_actor: float = 3e-4
+    lr_critic: float = 3e-4
+    entropy_beta: float = 0.0
+    num_seeds: int = 3
     envs: tuple[str, ...] = ("halfcheetah", "ant")
     results_dir: str = "results/mjx"
+    hardware_tag: str = "4090"

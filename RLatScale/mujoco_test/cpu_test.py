@@ -167,9 +167,6 @@ def train_linen_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
 
     @jax.jit
     def _update_mb(a_st, c_st, obs_mb, act_mb, lp_old, adv, tgt):
-        if config.advantage_norm:
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
         def actor_loss(params):
             mean, log_std = a_st.apply_fn(params, obs_mb)
             lp  = _normal_log_prob(act_mb, mean, log_std)
@@ -204,12 +201,14 @@ def train_linen_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
 
     for _ in tqdm(range(config.num_rollouts), desc=f"linen/{env_id}/s{seed}", leave=False):
         T, N = config.num_steps, config.num_envs
-        O  = np.zeros((T, N, obs_dim),  np.float32)
-        A  = np.zeros((T, N, action_dim), np.float32)
-        R  = np.zeros((T, N),             np.float32)
-        D  = np.zeros((T, N),             np.float32)
-        LP = np.zeros((T, N),             np.float32)
-        V  = np.zeros((T, N),             np.float32)
+        O       = np.zeros((T, N, obs_dim),   np.float32)
+        A       = np.zeros((T, N, action_dim), np.float32)
+        R       = np.zeros((T, N),             np.float32)
+        TERM    = np.zeros((T, N),             np.float32)
+        TRUNC   = np.zeros((T, N),             np.float32)
+        TRUNC_V = np.zeros((T, N),             np.float32)
+        LP      = np.zeros((T, N),             np.float32)
+        V       = np.zeros((T, N),             np.float32)
 
         for t in range(T):
             obs_j = jnp.array(obs_np)
@@ -221,11 +220,18 @@ def train_linen_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
             val    = critic_st.apply_fn(critic_st.params, obs_j)
             act_np = np.array(act_j)
 
-            obs_next, rew, term, trunc, _ = envs.step(act_np)
+            obs_next, rew, term, trunc, info = envs.step(act_np)
             done = (term | trunc).astype(np.float32)
 
+            trunc_val_t = np.zeros(N, np.float32)
+            if np.any(trunc):
+                final_obs = info.get("final_observation", obs_next)
+                v_fin = np.array(critic_st.apply_fn(critic_st.params, jnp.array(final_obs)))
+                trunc_val_t = np.where(trunc, v_fin, 0.0)
+
             O[t] = obs_np; A[t] = act_np; R[t] = rew
-            D[t] = done;   LP[t] = np.array(lp); V[t] = np.array(val)
+            TERM[t] = term.astype(np.float32); TRUNC[t] = trunc.astype(np.float32)
+            TRUNC_V[t] = trunc_val_t; LP[t] = np.array(lp); V[t] = np.array(val)
 
             ep_buf += rew
             for i in range(N):
@@ -236,7 +242,7 @@ def train_linen_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
 
         total_steps += config.batch_size
         last_val = np.array(critic_st.apply_fn(critic_st.params, jnp.array(obs_np)))
-        adv_all, tgt_all = _gae_numpy(R, V, D, last_val, config.gamma, config.gae_lambda)
+        adv_all, tgt_all = _gae_numpy(R, V, TERM, TRUNC, TRUNC_V, last_val, config.gamma, config.gae_lambda)
 
         B     = config.batch_size
         O_f   = O.reshape(B, obs_dim)
@@ -244,6 +250,8 @@ def train_linen_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
         LP_f  = LP.reshape(B)
         adv_f = adv_all.reshape(B)
         tgt_f = tgt_all.reshape(B)
+        if config.advantage_norm:
+            adv_f = (adv_f - adv_f.mean()) / (adv_f.std() + 1e-8)
 
         for _ in range(config.num_epochs):
             perm = rng_np.permutation(B)
@@ -317,10 +325,11 @@ def train_nnx_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
         return actor(obs_j), critic(obs_j)
 
     @nnx.jit
-    def _update_mb(actor, critic, actor_opt, critic_opt, obs_mb, act_mb, lp_old, adv, tgt):
-        if config.advantage_norm:
-            adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+    def _critic_val(critic, obs_j):
+        return critic(obs_j)
 
+    @nnx.jit
+    def _update_mb(actor, critic, actor_opt, critic_opt, obs_mb, act_mb, lp_old, adv, tgt):
         def actor_loss(actor):
             mean, log_std = actor(obs_mb)
             lp  = _normal_log_prob(act_mb, mean, log_std)
@@ -353,12 +362,14 @@ def train_nnx_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
 
     for _ in tqdm(range(config.num_rollouts), desc=f"nnx/{env_id}/s{seed}", leave=False):
         T, N = config.num_steps, config.num_envs
-        O  = np.zeros((T, N, obs_dim),  np.float32)
-        A  = np.zeros((T, N, action_dim), np.float32)
-        R  = np.zeros((T, N),             np.float32)
-        D  = np.zeros((T, N),             np.float32)
-        LP = np.zeros((T, N),             np.float32)
-        V  = np.zeros((T, N),             np.float32)
+        O       = np.zeros((T, N, obs_dim),   np.float32)
+        A       = np.zeros((T, N, action_dim), np.float32)
+        R       = np.zeros((T, N),             np.float32)
+        TERM    = np.zeros((T, N),             np.float32)
+        TRUNC   = np.zeros((T, N),             np.float32)
+        TRUNC_V = np.zeros((T, N),             np.float32)
+        LP      = np.zeros((T, N),             np.float32)
+        V       = np.zeros((T, N),             np.float32)
 
         for t in range(T):
             obs_j = jnp.array(obs_np)
@@ -369,11 +380,18 @@ def train_nnx_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
             lp     = _normal_log_prob(act_j, mean, log_std)
             act_np = np.array(act_j)
 
-            obs_next, rew, term, trunc, _ = envs.step(act_np)
+            obs_next, rew, term, trunc, info = envs.step(act_np)
             done = (term | trunc).astype(np.float32)
 
+            trunc_val_t = np.zeros(N, np.float32)
+            if np.any(trunc):
+                final_obs = info.get("final_observation", obs_next)
+                v_fin = np.array(_critic_val(critic, jnp.array(final_obs)))
+                trunc_val_t = np.where(trunc, v_fin, 0.0)
+
             O[t] = obs_np; A[t] = act_np; R[t] = rew
-            D[t] = done;   LP[t] = np.array(lp); V[t] = np.array(val)
+            TERM[t] = term.astype(np.float32); TRUNC[t] = trunc.astype(np.float32)
+            TRUNC_V[t] = trunc_val_t; LP[t] = np.array(lp); V[t] = np.array(val)
 
             ep_buf += rew
             for i in range(N):
@@ -384,7 +402,7 @@ def train_nnx_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
 
         total_steps += config.batch_size
         _, last_val = _forward(actor, critic, jnp.array(obs_np))
-        adv_all, tgt_all = _gae_numpy(R, V, D, np.array(last_val), config.gamma, config.gae_lambda)
+        adv_all, tgt_all = _gae_numpy(R, V, TERM, TRUNC, TRUNC_V, np.array(last_val), config.gamma, config.gae_lambda)
 
         B     = config.batch_size
         O_f   = O.reshape(B, obs_dim)
@@ -392,6 +410,8 @@ def train_nnx_mujoco(config: MuJoCoConfig, env_id: str, seed: int) -> dict:
         LP_f  = LP.reshape(B)
         adv_f = adv_all.reshape(B)
         tgt_f = tgt_all.reshape(B)
+        if config.advantage_norm:
+            adv_f = (adv_f - adv_f.mean()) / (adv_f.std() + 1e-8)
 
         for _ in range(config.num_epochs):
             perm = rng_np.permutation(B)

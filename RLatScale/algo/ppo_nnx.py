@@ -188,9 +188,6 @@ def train(
         adv_mb: jax.Array,
         tgt_mb: jax.Array,
     ) -> None:
-        if config.advantage_norm:
-            adv_mb = (adv_mb - adv_mb.mean()) / (adv_mb.std() + 1e-8)
-
         def actor_loss_fn(actor: Actor) -> jax.Array:
             logits = actor(obs_mb)
             lp = _log_prob(logits, act_mb)
@@ -221,6 +218,8 @@ def train(
         advantages, targets = _compute_gae(
             transitions, last_val, config.gamma, config.gae_lambda
         )
+        if config.advantage_norm:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
         # Epoch and minibatch loops (Python-level, nnx.jit per minibatch)
         for _ in range(config.num_epochs):
