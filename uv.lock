@@ -390,6 +390,21 @@ wheels = [
 ]
 
 [[package]]
+name = "ion-nn"
+version = "0.5.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "jax" },
+    { name = "jaxtyping" },
+    { name = "optax" },
+    { name = "treescope" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/fc/de/5acccb259fe96523d1474e854bbfa3b7544bec6c0f1e663c68b748d893fd/ion_nn-0.5.2.tar.gz", hash = "sha256:7b0d1fe831ed3e73d5b43196d3de41eca915394b600d5e3c8623e42c12b2d958", size = 1602664, upload-time = "2026-04-03T23:36:18.163Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/49/cd/9c12b627c7e4bc7b503410bf9822d3053a8d96b4f94a1f0d7f52056d1723/ion_nn-0.5.2-py3-none-any.whl", hash = "sha256:febc86b8f19372735823647b46762a5fb8a0306a8610b6f72dba1c02d42cfe8e", size = 44764, upload-time = "2026-04-03T23:36:16.338Z" },
+]
+
+[[package]]
 name = "itsdangerous"
 version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1204,6 +1219,7 @@ dependencies = [
     { name = "gymnasium" },
     { name = "gymnax" },
     { name = "imageio" },
+    { name = "ion-nn" },
     { name = "jax" },
     { name = "mujoco" },
     { name = "numpy" },
@@ -1242,6 +1258,7 @@ requires-dist = [
     { name = "gymnasium", specifier = ">=1.3.0" },
     { name = "gymnax", specifier = ">=0.0.9" },
     { name = "imageio", specifier = ">=2.37.3" },
+    { name = "ion-nn", specifier = ">=0.1.0" },
     { name = "jax", specifier = ">=0.4.0" },
     { name = "jax", extras = ["cuda12"], marker = "extra == 'gpu'", specifier = ">=0.4.0" },
     { name = "mujoco", specifier = ">=3.8.1" },

@@ -28,6 +28,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import platform
+import sys
 import threading
 import time
 from dataclasses import dataclass, field
@@ -51,7 +52,11 @@ from rliable import library as rly
 from rliable import metrics as rl_metrics
 from tqdm import tqdm
 
+import ion
+
 from RLatScale.algo.config import Config
+from RLatScale.algo.ppo_ion import ActorCritic as IonDiscreteActorCritic
+from RLatScale.algo.ppo_ion import ActorCriticContinuous as IonContinuousActorCritic
 from RLatScale.algo.ppo_linen import Actor as LinenDiscreteActor
 from RLatScale.algo.ppo_linen import Critic as LinenCritic
 from RLatScale.algo.ppo_nnx import Actor as NNXDiscreteActor
@@ -367,7 +372,7 @@ def train_linen_gymnasium(
     t0 = time.perf_counter()
     rng_np = np.random.default_rng(seed)
 
-    for _ in tqdm(range(config.num_rollouts), desc=f"linen/{env_id}/s{seed}", leave=False):
+    for _ in tqdm(range(config.num_rollouts), desc=f"linen/{env_id}/s{seed}", leave=False, file=sys.stderr):
         T, N = config.num_steps, config.num_envs
         O  = np.zeros((T, N, obs_dim),  np.float32)
         A  = np.zeros((T, N, action_dim) if is_cont else (T, N),
@@ -554,7 +559,7 @@ def train_nnx_gymnasium(
     t0 = time.perf_counter()
     rng_np = np.random.default_rng(seed)
 
-    for _ in tqdm(range(config.num_rollouts), desc=f"nnx/{env_id}/s{seed}", leave=False):
+    for _ in tqdm(range(config.num_rollouts), desc=f"nnx/{env_id}/s{seed}", leave=False, file=sys.stderr):
         T, N = config.num_steps, config.num_envs
         O  = np.zeros((T, N, obs_dim),  np.float32)
         A  = np.zeros((T, N, action_dim) if is_cont else (T, N),
@@ -642,6 +647,165 @@ def train_nnx_gymnasium(
     total_time = time.perf_counter() - t0
     return {
         "impl":                "nnx",
+        "env":                 env_id,
+        "seed":                seed,
+        "returns_by_rollout":  returns_by_rollout,
+        "steps_by_rollout":    steps_by_rollout,
+        "time_by_rollout":     time_by_rollout,
+        "time_to_threshold":   time_to_threshold,
+        "steps_to_threshold":  steps_to_threshold,
+        "steps_per_second":    total_steps / total_time,
+        "total_time":          total_time,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Ion — Gymnasium training
+# ---------------------------------------------------------------------------
+
+def train_ion_gymnasium(
+    config: Config,
+    env_id: str,
+    seed: int,
+) -> dict:
+    """Run one PPO (ion) training trial and return per-rollout metrics."""
+
+    meta = _ENV_META[env_id]
+    is_cont   = meta["action_type"] == "continuous"
+    threshold = meta["threshold"]
+
+    envs = gymnasium.vector.SyncVectorEnv(
+        [lambda: gymnasium.make(env_id) for _ in range(config.num_envs)]
+    )
+    obs_dim    = envs.single_observation_space.shape[0]
+    action_dim = (
+        envs.single_action_space.shape[0] if is_cont
+        else int(envs.single_action_space.n)
+    )
+    act_low  = envs.single_action_space.low  if is_cont else None
+    act_high = envs.single_action_space.high if is_cont else None
+
+    rng = jax.random.key(seed)
+    rng, key_net = jax.random.split(rng)
+
+    network = (
+        IonContinuousActorCritic(obs_dim, action_dim, config.hidden_dim, 2, key=key_net)
+        if is_cont else
+        IonDiscreteActorCritic(obs_dim, action_dim, key=key_net)
+    )
+
+    n_updates = config.num_rollouts * config.num_epochs * config.num_minibatches
+    sched = optax.linear_schedule(config.lr_actor, 0.0, n_updates) if config.anneal_lr else config.lr_actor
+    tx = optax.chain(optax.clip_by_global_norm(config.max_grad_norm_actor), optax.adam(sched, eps=1e-5))
+    optimizer = ion.Optimizer(tx, network)
+
+    @jax.jit
+    def _update_mb(network, optimizer, obs_mb, act_mb, lp_old, adv, tgt):
+        def loss_fn(network):
+            lp, ent, val = network.get_log_prob_entropy_value(obs_mb, act_mb)
+            ratio = jnp.exp(lp - lp_old)
+            pg = jnp.maximum(
+                -adv * ratio,
+                -adv * jnp.clip(ratio, 1.0 - config.clip_eps, 1.0 + config.clip_eps),
+            ).mean()
+            vf = 0.5 * ((val - tgt) ** 2).mean()
+            return pg + vf - config.entropy_beta * ent.mean()
+
+        grads = jax.grad(loss_fn)(network)
+        network, optimizer = optimizer.update(network, grads)
+        return network, optimizer
+
+    obs_np, _ = envs.reset(seed=seed)
+    ep_buf    = np.zeros(config.num_envs, dtype=np.float32)
+    completed: list[tuple[int, float]] = []
+
+    returns_by_rollout: list[float] = []
+    steps_by_rollout:   list[int]   = []
+    time_by_rollout:    list[float] = []
+    time_to_threshold  = -1.0
+    steps_to_threshold = -1
+    total_steps        = 0
+    t0 = time.perf_counter()
+    rng_np = np.random.default_rng(seed)
+
+    for _ in tqdm(range(config.num_rollouts), desc=f"ion/{env_id}/s{seed}", leave=False, file=sys.stderr):
+        T, N = config.num_steps, config.num_envs
+        O  = np.zeros((T, N, obs_dim),  np.float32)
+        A  = np.zeros((T, N, action_dim) if is_cont else (T, N),
+                      np.float32 if is_cont else np.int32)
+        R       = np.zeros((T, N), np.float32)
+        TERM    = np.zeros((T, N), np.float32)
+        TRUNC   = np.zeros((T, N), np.float32)
+        TRUNC_V = np.zeros((T, N), np.float32)
+        LP      = np.zeros((T, N), np.float32)
+        V       = np.zeros((T, N), np.float32)
+
+        for t in range(T):
+            obs_j = jnp.array(obs_np)
+            rng, key = jax.random.split(rng)
+
+            act_j, lp, val = network.get_action_and_value(obs_j, key=key)
+            # step env with clipped action; store unclipped so lp_old stays consistent
+            act_env = np.array(jnp.clip(act_j, act_low, act_high)) if is_cont else np.array(act_j)
+
+            obs_next, rew, term, trunc, info = envs.step(act_env)
+            done = (term | trunc).astype(np.float32)
+
+            trunc_val_t = np.zeros(N, np.float32)
+            if np.any(trunc):
+                final_obs = info.get("final_observation", obs_next)
+                v_fin = np.array(network.get_value(jnp.array(final_obs)))
+                trunc_val_t = np.where(trunc, v_fin, 0.0)
+
+            O[t] = obs_np; A[t] = np.array(act_j); R[t] = rew  # store unclipped act_j
+            TERM[t] = term.astype(np.float32); TRUNC[t] = trunc.astype(np.float32)
+            TRUNC_V[t] = trunc_val_t; LP[t] = np.array(lp); V[t] = np.array(val)
+
+            ep_buf += rew
+            for i in range(N):
+                if done[i]:
+                    completed.append((total_steps + t * N, float(ep_buf[i])))
+                    ep_buf[i] = 0.0
+            obs_np = obs_next
+
+        total_steps += config.batch_size
+        last_val = np.array(network.get_value(jnp.array(obs_np)))
+        adv_all, tgt_all = _gae_numpy(R, V, TERM, TRUNC, TRUNC_V, last_val, config.gamma, config.gae_lambda)
+
+        B    = config.batch_size
+        O_f  = O.reshape(B, obs_dim)
+        A_f  = A.reshape(B, action_dim) if is_cont else A.reshape(B)
+        LP_f = LP.reshape(B)
+        adv_f = adv_all.reshape(B)
+        tgt_f = tgt_all.reshape(B)
+        if config.advantage_norm:
+            adv_f = (adv_f - adv_f.mean()) / (adv_f.std() + 1e-8)
+
+        for _ in range(config.num_epochs):
+            perm = rng_np.permutation(B)
+            for mb in range(config.num_minibatches):
+                idx = perm[mb * config.minibatch_size : (mb + 1) * config.minibatch_size]
+                network, optimizer = _update_mb(
+                    network, optimizer,
+                    jnp.array(O_f[idx]),  jnp.array(A_f[idx]),
+                    jnp.array(LP_f[idx]), jnp.array(adv_f[idx]), jnp.array(tgt_f[idx]),
+                )
+
+        elapsed = time.perf_counter() - t0
+        win = [r for s, r in completed if s > total_steps - config.batch_size * 5]
+        mean_ret = float(np.mean(win)) if win else float("nan")
+        returns_by_rollout.append(mean_ret)
+        steps_by_rollout.append(total_steps)
+        time_by_rollout.append(elapsed)
+
+        if time_to_threshold < 0 and not np.isnan(mean_ret) and mean_ret >= threshold:
+            time_to_threshold  = elapsed
+            steps_to_threshold = total_steps
+
+    envs.close()
+    total_time = time.perf_counter() - t0
+    return {
+        "impl":                "ion",
         "env":                 env_id,
         "seed":                seed,
         "returns_by_rollout":  returns_by_rollout,
@@ -859,7 +1023,12 @@ def run_experiment(
 ) -> tuple[dict, list[dict]]:
     """Run `num_seeds` trials; return (aggregated metrics, raw seed results)."""
 
-    train_fn = train_linen_gymnasium if impl == "linen" else train_nnx_gymnasium
+    if impl == "linen":
+        train_fn = train_linen_gymnasium
+    elif impl == "nnx":
+        train_fn = train_nnx_gymnasium
+    else:
+        train_fn = train_ion_gymnasium
 
     monitor.start()
     seed_results = []

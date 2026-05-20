@@ -23,6 +23,7 @@ dependencies = [
     "numpy>=2.4.5",
     "scipy>=1.17.1",
     "imageio>=2.37.3",
+    "ion-nn>=0.1.0",
 ]
 
 [project.optional-dependencies]

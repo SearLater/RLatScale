@@ -34,7 +34,7 @@ class Config:
     # tuple used (not list) so Config remains hashable for jax.tree_util.register_static
     num_seeds: int = 1
     envs: tuple[str, ...] = ("CartPole-v1", "Pendulum-v1")
-    impls: tuple[str, ...] = ("nnx",)
+    impls: tuple[str, ...] = ("ion",)
     results_dir: str = "results"
     # Leave empty to auto-detect from JAX backend + system info.
     # Set explicitly to label runs (e.g. "m3_8gb", "4090_pcie") when
@@ -69,6 +69,8 @@ class GPUConfig(Config):
     num_steps: int = 128
     num_minibatches: int = 8
     num_seeds: int = 1
+    impls: tuple[str, ...] = ("nnx", "ion")
+    hardware_tag: str = "4090"
 
 
 @jax.tree_util.register_static
@@ -91,7 +93,7 @@ class MuJoCoConfig(Config):
     entropy_beta: float = 0.0
     num_seeds: int = 3
     envs: tuple[str, ...] = ("HalfCheetah-v4", "Ant-v4")
-    impls: tuple[str, ...] = ("nnx",)
+    impls: tuple[str, ...] = ("nnx", "ion")
     hardware_tag: str = "4090"
 
 

@@ -16,6 +16,7 @@ Usage
 
 from __future__ import annotations
 
+import sys
 import time
 from typing import NamedTuple
 
@@ -29,7 +30,10 @@ from flax import nnx
 from flax.training.train_state import TrainState
 from tqdm import tqdm
 
+import ion
+
 from RLatScale.algo.config import BraxConfig
+from RLatScale.algo.ppo_ion import ActorCriticContinuous as IonContinuousActorCritic
 from RLatScale.algo.ppo_linen import AgentState, Critic as LinenCritic
 from RLatScale.algo.ppo_nnx import Critic as NNXCritic
 from RLatScale.gym_test.cpu_test import (
@@ -205,7 +209,7 @@ def train_linen_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
     t0       = time.perf_counter()
     rng_perm = jax.random.key(seed + 99_999)
 
-    for _ in tqdm(range(config.num_rollouts), desc=f"linen_brax/{env_id}/s{seed}", leave=False):
+    for _ in tqdm(range(config.num_rollouts), desc=f"linen_brax/{env_id}/s{seed}", leave=False, file=sys.stderr):
         brax_state, ep_buf, step_counts, rng, transitions = _collect_rollout(
             agent_state, brax_state, ep_buf, step_counts, rng
         )
@@ -225,14 +229,16 @@ def train_linen_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
                 flat = x.reshape(B, *x.shape[2:])[perm]
                 return flat.reshape(config.num_minibatches, config.minibatch_size, *x.shape[2:])
 
+            obs_sh = _reshape(transitions.obs)
+            act_sh = _reshape(transitions.action)
+            lp_sh  = _reshape(transitions.log_prob)
+            adv_sh = _reshape(advantages)
+            tgt_sh = _reshape(targets)
+
             for mb in range(config.num_minibatches):
                 agent_state = _update_mb(
                     agent_state,
-                    _reshape(transitions.obs)[mb],
-                    _reshape(transitions.action)[mb],
-                    _reshape(transitions.log_prob)[mb],
-                    _reshape(advantages)[mb],
-                    _reshape(targets)[mb],
+                    obs_sh[mb], act_sh[mb], lp_sh[mb], adv_sh[mb], tgt_sh[mb],
                 )
 
         total_steps += config.batch_size
@@ -308,8 +314,11 @@ def train_nnx_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
         graphdef_a, state_a = nnx.split(actor)
         graphdef_c, state_c = nnx.split(critic)
 
+        # state_a / state_c are captured as closures — NOT in the scan carry.
+        # XLA can treat them as constants within the scan body, matching
+        # the Linen pattern where agent_state.params are a closure variable.
         def _env_step(carry, _):
-            state_a, state_c, brax_state, ep_buf, step_counts, rng = carry
+            brax_state, ep_buf, step_counts, rng = carry
             obs = brax_state.obs
             rng, rng_act = jax.random.split(rng)
 
@@ -329,17 +338,21 @@ def train_nnx_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
             step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
 
             t = BraxTransition(obs, action, reward, done, log_prob, value, ep_return)
-            return (state_a, state_c, brax_state, ep_buf_new, step_counts, rng), t
+            return (brax_state, ep_buf_new, step_counts, rng), t
 
-        (_, _, brax_state, ep_buf, step_counts, rng), transitions = jax.lax.scan(
+        (brax_state, ep_buf, step_counts, rng), transitions = jax.lax.scan(
             _env_step,
-            (state_a, state_c, brax_state, ep_buf, step_counts, rng),
+            (brax_state, ep_buf, step_counts, rng),
             None,
             length=config.num_steps,
         )
         return brax_state, ep_buf, step_counts, rng, transitions
 
     _collect_jit = nnx.jit(_collect_rollout)
+
+    @nnx.jit
+    def _eval_critic(critic, obs):
+        return critic(obs)
 
     @nnx.jit
     def _update_mb(actor, critic, actor_opt, critic_opt, obs_mb, act_mb, lp_old, adv, tgt):
@@ -381,11 +394,11 @@ def train_nnx_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
     t0       = time.perf_counter()
     rng_perm = jax.random.key(seed + 99_999)
 
-    for _ in tqdm(range(config.num_rollouts), desc=f"nnx_brax/{env_id}/s{seed}", leave=False):
+    for _ in tqdm(range(config.num_rollouts), desc=f"nnx_brax/{env_id}/s{seed}", leave=False, file=sys.stderr):
         brax_state, ep_buf, step_counts, rng, transitions = _collect_jit(
             actor, critic, brax_state, ep_buf, step_counts, rng
         )
-        last_val   = nnx.jit(critic)(brax_state.obs)
+        last_val   = _eval_critic(critic, brax_state.obs)
         advantages, targets = _gae(transitions, last_val)
         if config.advantage_norm:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
@@ -399,14 +412,16 @@ def train_nnx_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
                 flat = x.reshape(B, *x.shape[2:])[perm]
                 return flat.reshape(config.num_minibatches, config.minibatch_size, *x.shape[2:])
 
+            obs_sh = _reshape(transitions.obs)
+            act_sh = _reshape(transitions.action)
+            lp_sh  = _reshape(transitions.log_prob)
+            adv_sh = _reshape(advantages)
+            tgt_sh = _reshape(targets)
+
             for mb in range(config.num_minibatches):
                 _update_mb(
                     actor, critic, actor_opt, critic_opt,
-                    _reshape(transitions.obs)[mb],
-                    _reshape(transitions.action)[mb],
-                    _reshape(transitions.log_prob)[mb],
-                    _reshape(advantages)[mb],
-                    _reshape(targets)[mb],
+                    obs_sh[mb], act_sh[mb], lp_sh[mb], adv_sh[mb], tgt_sh[mb],
                 )
 
         total_steps += config.batch_size
@@ -438,6 +453,163 @@ def train_nnx_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# Ion — Python-loop training on Brax
+# ---------------------------------------------------------------------------
+
+def train_ion_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
+    meta_key  = _BRAX_TO_META[env_id]
+    threshold = _ENV_META[meta_key]["threshold"]
+
+    episode_length = _EPISODE_LENGTH[env_id]
+    base_env = brax.envs.get_environment(env_id)
+    env      = AutoResetWrapper(base_env)
+    obs_dim    = env.observation_size
+    action_dim = env.action_size
+
+    rng = jax.random.key(seed)
+    rng, key_net = jax.random.split(rng)
+
+    network = IonContinuousActorCritic(obs_dim, action_dim, config.hidden_dim, 2, key=key_net)
+
+    total_updates = config.num_rollouts * config.num_epochs * config.num_minibatches
+    sched = optax.linear_schedule(config.lr_actor, 0.0, total_updates) if config.anneal_lr else config.lr_actor
+    tx = optax.chain(optax.clip_by_global_norm(config.max_grad_norm_actor), optax.adam(sched, eps=1e-5))
+    optimizer = ion.Optimizer(tx, network)
+
+    jit_reset = jax.jit(jax.vmap(env.reset))
+    jit_step  = jax.jit(jax.vmap(env.step))
+
+    rng, rng_reset, rng_sc = jax.random.split(rng, 3)
+    brax_state = jit_reset(jax.random.split(rng_reset, config.num_envs))
+    ep_buf = jnp.zeros(config.num_envs)
+    step_counts = jax.random.randint(
+        rng_sc, (config.num_envs,), 0, episode_length, dtype=jnp.int32
+    )
+
+    # network passed as outer JIT arg — NOT in scan carry, XLA constant-folds it
+    def _collect_rollout(network, brax_state, ep_buf, step_counts, rng):
+        def _env_step(carry, _):
+            brax_state, ep_buf, step_counts, rng = carry
+            obs = brax_state.obs
+            rng, rng_act = jax.random.split(rng)
+
+            action, log_prob, value = network.get_action_and_value(obs, key=rng_act)
+            # step env with clipped; store unclipped so lp_old stays consistent
+            step_counts = step_counts + 1
+            brax_state  = jit_step(brax_state, jnp.clip(action, -1.0, 1.0))
+            reward = brax_state.reward
+            done   = (brax_state.done | (step_counts >= episode_length)).astype(jnp.float32)
+
+            ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
+            ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
+            step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
+
+            t = BraxTransition(obs, action, reward, done, log_prob, value, ep_return)
+            return (brax_state, ep_buf_new, step_counts, rng), t
+
+        (brax_state, ep_buf, step_counts, rng), transitions = jax.lax.scan(
+            _env_step, (brax_state, ep_buf, step_counts, rng), None, length=config.num_steps
+        )
+        return brax_state, ep_buf, step_counts, rng, transitions
+
+    _collect_jit = jax.jit(_collect_rollout)
+
+    @jax.jit
+    def _update_mb(network, optimizer, obs_mb, act_mb, lp_old, adv, tgt):
+        def loss_fn(network):
+            lp, ent, val = network.get_log_prob_entropy_value(obs_mb, act_mb)
+            ratio = jnp.exp(lp - lp_old)
+            pg = jnp.maximum(
+                -adv * ratio,
+                -adv * jnp.clip(ratio, 1 - config.clip_eps, 1 + config.clip_eps),
+            ).mean()
+            vf = 0.5 * ((val - tgt) ** 2).mean()
+            return pg + vf - config.entropy_beta * ent.mean()
+
+        grads = jax.grad(loss_fn)(network)
+        network, optimizer = optimizer.update(network, grads)
+        return network, optimizer
+
+    def _gae(transitions: BraxTransition, last_value: jax.Array):
+        def _step(carry, t: BraxTransition):
+            gae, nv = carry
+            delta = t.reward + config.gamma * nv * (1 - t.done) - t.value
+            gae   = delta + config.gamma * config.gae_lambda * (1 - t.done) * gae
+            return (gae, t.value), (gae, gae + t.value)
+
+        _, (adv, tgt) = jax.lax.scan(
+            _step, (jnp.zeros_like(last_value), last_value), transitions, reverse=True
+        )
+        return adv, tgt
+
+    returns_by_rollout: list[float] = []
+    steps_by_rollout:   list[int]   = []
+    time_by_rollout:    list[float] = []
+    time_to_threshold  = -1.0
+    steps_to_threshold = -1
+    total_steps = 0
+    t0       = time.perf_counter()
+    rng_perm = jax.random.key(seed + 99_999)
+
+    for _ in tqdm(range(config.num_rollouts), desc=f"ion_brax/{env_id}/s{seed}", leave=False, file=sys.stderr):
+        brax_state, ep_buf, step_counts, rng, transitions = _collect_jit(
+            network, brax_state, ep_buf, step_counts, rng
+        )
+        last_val   = jax.jit(lambda n, o: n.get_value(o))(network, brax_state.obs)
+        advantages, targets = _gae(transitions, last_val)
+        if config.advantage_norm:
+            advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+        B = config.batch_size
+        for _ in range(config.num_epochs):
+            rng_perm, rng_sub = jax.random.split(rng_perm)
+            perm = jax.random.permutation(rng_sub, B)
+
+            def _reshape(x):
+                flat = x.reshape(B, *x.shape[2:])[perm]
+                return flat.reshape(config.num_minibatches, config.minibatch_size, *x.shape[2:])
+
+            obs_sh = _reshape(transitions.obs)
+            act_sh = _reshape(transitions.action)
+            lp_sh  = _reshape(transitions.log_prob)
+            adv_sh = _reshape(advantages)
+            tgt_sh = _reshape(targets)
+
+            for mb in range(config.num_minibatches):
+                network, optimizer = _update_mb(
+                    network, optimizer,
+                    obs_sh[mb], act_sh[mb], lp_sh[mb], adv_sh[mb], tgt_sh[mb],
+                )
+
+        total_steps += config.batch_size
+        ep_r     = np.array(transitions.ep_return)
+        mean_ret = float(np.nanmean(ep_r)) if not np.all(np.isnan(ep_r)) else float("nan")
+        elapsed  = time.perf_counter() - t0
+
+        returns_by_rollout.append(mean_ret)
+        steps_by_rollout.append(total_steps)
+        time_by_rollout.append(elapsed)
+
+        if time_to_threshold < 0 and not np.isnan(mean_ret) and mean_ret >= threshold:
+            time_to_threshold  = elapsed
+            steps_to_threshold = total_steps
+
+    jax.block_until_ready(brax_state.obs)
+    total_time = time.perf_counter() - t0
+
+    return {
+        "impl": "ion", "env": meta_key, "seed": seed,
+        "returns_by_rollout":  returns_by_rollout,
+        "steps_by_rollout":    steps_by_rollout,
+        "time_by_rollout":     time_by_rollout,
+        "time_to_threshold":   time_to_threshold,
+        "steps_to_threshold":  steps_to_threshold,
+        "steps_per_second":    total_steps / total_time,
+        "total_time":          total_time,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Experiment runner
 # ---------------------------------------------------------------------------
 
@@ -448,7 +620,12 @@ def run_experiment(
     num_seeds: int,
     monitor: ResourceMonitor,
 ) -> tuple[dict, list[dict]]:
-    train_fn = train_linen_brax if impl == "linen" else train_nnx_brax
+    if impl == "linen":
+        train_fn = train_linen_brax
+    elif impl == "nnx":
+        train_fn = train_nnx_brax
+    else:
+        train_fn = train_ion_brax
     monitor.start()
     seed_results = [train_fn(config, env_id, s) for s in range(num_seeds)]
     monitor.stop()
