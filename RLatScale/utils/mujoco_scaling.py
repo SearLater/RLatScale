@@ -1,0 +1,222 @@
+"""
+mujoco_scaling.py
+-----------------
+Throughput scaling benchmark: steps/s vs number of parallel environments
+for MuJoCo environments (CPU Gymnasium vs Brax vs MJX).
+
+Sweeps num_envs on a log scale up to 10 M.  CPU is capped at a low limit
+(SyncVectorEnv is sequential so MuJoCo sim time grows linearly with envs).
+Brax and MJX backends continue until OOM or the 10 M ceiling.
+
+A fixed num_steps (_PROBE_STEPS) overrides each backend's default so that
+steps/s is measured under the same rollout geometry across all backends.
+
+Outputs saved to results/mujoco_scaling_{timestamp}/
+    scaling.png    — log-log throughput vs num_envs (all backend/impl combos)
+    scaling.csv    — raw (backend, impl, num_envs, steps_per_second) data
+
+Usage
+-----
+    python -m RLatScale.utils.mujoco_scaling
+"""
+
+from __future__ import annotations
+
+import csv
+import dataclasses
+from datetime import datetime
+from pathlib import Path
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+from RLatScale.algo.config import BraxConfig, MjxConfig, MuJoCoConfig
+from RLatScale.mujoco_test import brax_test, cpu_test, mjx_test
+from RLatScale.gym_test.cpu_test import ResourceMonitor
+
+
+# ---------------------------------------------------------------------------
+# Sweep parameters
+# ---------------------------------------------------------------------------
+
+_PROBE_ROLLOUTS = 3     # rollouts per probe point
+_PROBE_STEPS    = 64    # override num_steps for all backends (keeps probes fast)
+
+# CPU MuJoCo sim is slow per step; keep sweep small to avoid hour-long runs.
+_CPU_SWEEP:  list[int] = [2**i for i in range(7)]           # 1 → 64
+_GPU_SWEEP:  list[int] = [2**i for i in range(24)] + [10_000_000]  # 1 → ~16 M
+
+# Environment identifiers per backend
+_CPU_ENV  = "HalfCheetah-v4"   # Gymnasium name
+_BRAX_ENV = "halfcheetah"      # Brax / MJX short name
+_MJX_ENV  = "halfcheetah"
+
+
+# ---------------------------------------------------------------------------
+# Colour / style palette
+# ---------------------------------------------------------------------------
+
+_STYLE: dict[tuple[str, str], dict] = {
+    ("cpu",  "linen"): {"color": "#1D4ED8", "linestyle": "-",  "marker": "o", "label": "CPU · Linen"},
+    ("cpu",  "nnx"):   {"color": "#60A5FA", "linestyle": "--", "marker": "s", "label": "CPU · NNX"},
+    ("brax", "linen"): {"color": "#15803D", "linestyle": "-",  "marker": "o", "label": "Brax · Linen"},
+    ("brax", "nnx"):   {"color": "#4ADE80", "linestyle": "--", "marker": "s", "label": "Brax · NNX"},
+    ("mjx",  "linen"): {"color": "#EA580C", "linestyle": "-",  "marker": "o", "label": "MJX · Linen"},
+    ("mjx",  "nnx"):   {"color": "#FB923C", "linestyle": "--", "marker": "s", "label": "MJX · NNX"},
+}
+
+
+# ---------------------------------------------------------------------------
+# Probe helper
+# ---------------------------------------------------------------------------
+
+def _probe(base_config, run_fn, env_id: str, impl: str, n_envs: int) -> float | None:
+    """Run a short throughput probe. Returns steps/s, or None on failure."""
+    probe = dataclasses.replace(
+        base_config,
+        num_envs=n_envs,
+        num_steps=_PROBE_STEPS,
+        total_timesteps=_PROBE_ROLLOUTS * n_envs * _PROBE_STEPS,
+        hardware_tag="",
+    )
+    monitor = ResourceMonitor()
+    try:
+        metrics, _ = run_fn(probe, env_id, impl, 1, monitor)
+        return float(metrics["mean_steps_per_second"])
+    except Exception as exc:
+        print(f"    [SKIP] {exc!r}")
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Sweep runner
+# ---------------------------------------------------------------------------
+
+def sweep(
+    backend: str,
+    base_config,
+    run_fn,
+    env_id: str,
+    impl: str,
+    counts: list[int],
+) -> dict[int, float]:
+    """Probe throughput for each num_envs in counts; stop at first failure."""
+    results: dict[int, float] = {}
+    for n in counts:
+        print(f"  [{backend.upper()}/{impl}] {n:>10,} envs …", end=" ", flush=True)
+        sps = _probe(base_config, run_fn, env_id, impl, n)
+        if sps is None:
+            print()
+            break
+        print(f"{sps:>12,.0f} steps/s")
+        results[n] = sps
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Plot
+# ---------------------------------------------------------------------------
+
+def plot_scaling(
+    all_results: dict[tuple[str, str], dict[int, float]],
+    out_dir: Path,
+) -> None:
+    fig, ax = plt.subplots(figsize=(10, 6))
+
+    for (backend, impl), data in all_results.items():
+        if not data:
+            continue
+        style = _STYLE.get((backend, impl), {})
+        xs = list(data.keys())
+        ys = list(data.values())
+        ax.loglog(
+            xs, ys,
+            color=style["color"],
+            linestyle=style["linestyle"],
+            linewidth=2.0,
+            marker=style["marker"],
+            markersize=5,
+            label=style.get("label", f"{backend}/{impl}"),
+        )
+
+    ax.set_xlabel("Number of parallel environments")
+    ax.set_ylabel("Throughput (steps/s)")
+    ax.set_title("Throughput Scaling — HalfCheetah (CPU vs Brax vs MJX)")
+    ax.legend(fontsize=9)
+    ax.grid(True, alpha=0.3, which="both")
+    ax.xaxis.set_major_formatter(
+        matplotlib.ticker.FuncFormatter(lambda x, _: f"{x:,.0f}")
+    )
+    ax.yaxis.set_major_formatter(
+        matplotlib.ticker.FuncFormatter(lambda x, _: f"{x:,.0f}")
+    )
+    fig.tight_layout()
+
+    path = out_dir / "scaling.png"
+    fig.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  Saved {path}")
+
+
+# ---------------------------------------------------------------------------
+# CSV
+# ---------------------------------------------------------------------------
+
+def save_csv(
+    all_results: dict[tuple[str, str], dict[int, float]],
+    out_dir: Path,
+) -> None:
+    path = out_dir / "scaling.csv"
+    with open(path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["backend", "impl", "num_envs", "steps_per_second"])
+        for (backend, impl), data in all_results.items():
+            for n_envs, sps in data.items():
+                writer.writerow([backend, impl, n_envs, f"{sps:.2f}"])
+    print(f"  Saved {path}")
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+def main() -> None:
+    ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
+    out_dir = Path("results") / f"mujoco_scaling_{ts}"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"\nResults directory: {out_dir}\n{'═' * 60}")
+
+    cpu_base  = MuJoCoConfig()
+    brax_base = BraxConfig()
+    mjx_base  = MjxConfig()
+
+    all_results: dict[tuple[str, str], dict[int, float]] = {}
+
+    for impl in ("linen", "nnx"):
+        print(f"\n── CPU / {impl} ──")
+        all_results[("cpu", impl)] = sweep(
+            "cpu", cpu_base, cpu_test.run_experiment, _CPU_ENV, impl, _CPU_SWEEP
+        )
+
+    for impl in ("linen", "nnx"):
+        print(f"\n── Brax / {impl} ──")
+        all_results[("brax", impl)] = sweep(
+            "brax", brax_base, brax_test.run_experiment, _BRAX_ENV, impl, _GPU_SWEEP
+        )
+
+    for impl in ("linen", "nnx"):
+        print(f"\n── MJX / {impl} ──")
+        all_results[("mjx", impl)] = sweep(
+            "mjx", mjx_base, mjx_test.run_experiment, _MJX_ENV, impl, _GPU_SWEEP
+        )
+
+    print(f"\n{'═' * 60}\nGenerating outputs …")
+    plot_scaling(all_results, out_dir)
+    save_csv(all_results, out_dir)
+
+    print(f"\nDone. All outputs in {out_dir}/")
+
+
+if __name__ == "__main__":
+    main()
