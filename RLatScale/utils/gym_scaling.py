@@ -52,8 +52,10 @@ _GPU_SWEEP: list[int] = [2**i for i in range(24)] + [10_000_000]  # 1 → ~16 M
 _STYLE: dict[tuple[str, str], dict] = {
     ("cpu", "linen"): {"color": "#1D4ED8", "linestyle": "-",  "marker": "o", "label": "CPU · Linen"},
     ("cpu", "nnx"):   {"color": "#60A5FA", "linestyle": "--", "marker": "s", "label": "CPU · NNX"},
+    ("cpu", "ion"):   {"color": "#1E8A3E", "linestyle": ":",  "marker": "^", "label": "CPU · Ion"},
     ("gpu", "linen"): {"color": "#EA580C", "linestyle": "-",  "marker": "o", "label": "GPU · Linen"},
     ("gpu", "nnx"):   {"color": "#FB923C", "linestyle": "--", "marker": "s", "label": "GPU · NNX"},
+    ("gpu", "ion"):   {"color": "#16A34A", "linestyle": ":",  "marker": "^", "label": "GPU · Ion"},
 }
 
 
@@ -187,13 +189,13 @@ def main() -> None:
 
     all_results: dict[tuple[str, str], dict[int, float]] = {}
 
-    for impl in ("linen", "nnx"):
+    for impl in ("ion",):
         print(f"\n── CPU / {impl} ──")
         all_results[("cpu", impl)] = sweep(
             "cpu", cpu_base, cpu_test.run_experiment, _PROBE_ENV, impl, _CPU_SWEEP
         )
 
-    for impl in ("linen", "nnx"):
+    for impl in ("ion",):
         print(f"\n── GPU / {impl} ──")
         all_results[("gpu", impl)] = sweep(
             "gpu", gpu_base, gpu_test.run_experiment, _PROBE_ENV, impl, _GPU_SWEEP

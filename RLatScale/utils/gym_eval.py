@@ -46,8 +46,10 @@ from RLatScale.gym_test.cpu_test import ResourceMonitor, _print_summary, save_ru
 _STYLE: dict[tuple[str, str], dict] = {
     ("cpu", "linen"): {"color": "#1D4ED8", "linestyle": "-",  "label": "CPU · Linen"},
     ("cpu", "nnx"):   {"color": "#60A5FA", "linestyle": "--", "label": "CPU · NNX"},
+    ("cpu", "ion"):   {"color": "#1E8A3E", "linestyle": ":",  "label": "CPU · Ion"},
     ("gpu", "linen"): {"color": "#EA580C", "linestyle": "-",  "label": "GPU · Linen"},
     ("gpu", "nnx"):   {"color": "#FB923C", "linestyle": "--", "label": "GPU · NNX"},
+    ("gpu", "ion"):   {"color": "#16A34A", "linestyle": ":",  "label": "GPU · Ion"},
 }
 
 
@@ -289,9 +291,8 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nResults directory: {out_dir}\n{'═' * 60}")
 
-    # Run both Linen and NNX for a full 2×2 comparison (backend × impl)
-    cpu_config = dataclasses.replace(Config(),    impls=("linen", "nnx"), hardware_tag="")
-    gpu_config = dataclasses.replace(GPUConfig(), impls=("linen", "nnx"), hardware_tag="")
+    cpu_config = dataclasses.replace(Config(),    impls=("ion",), hardware_tag="")
+    gpu_config = dataclasses.replace(GPUConfig(), impls=("ion",), hardware_tag="")
 
     results = run_all(cpu_config, gpu_config, out_dir)
 

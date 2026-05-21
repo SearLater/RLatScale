@@ -60,10 +60,13 @@ _MJX_ENV  = "halfcheetah"
 _STYLE: dict[tuple[str, str], dict] = {
     ("cpu",  "linen"): {"color": "#1D4ED8", "linestyle": "-",  "marker": "o", "label": "CPU · Linen"},
     ("cpu",  "nnx"):   {"color": "#60A5FA", "linestyle": "--", "marker": "s", "label": "CPU · NNX"},
+    ("cpu",  "ion"):   {"color": "#93C5FD", "linestyle": ":",  "marker": "^", "label": "CPU · Ion"},
     ("brax", "linen"): {"color": "#15803D", "linestyle": "-",  "marker": "o", "label": "Brax · Linen"},
     ("brax", "nnx"):   {"color": "#4ADE80", "linestyle": "--", "marker": "s", "label": "Brax · NNX"},
+    ("brax", "ion"):   {"color": "#86EFAC", "linestyle": ":",  "marker": "^", "label": "Brax · Ion"},
     ("mjx",  "linen"): {"color": "#EA580C", "linestyle": "-",  "marker": "o", "label": "MJX · Linen"},
     ("mjx",  "nnx"):   {"color": "#FB923C", "linestyle": "--", "marker": "s", "label": "MJX · NNX"},
+    ("mjx",  "ion"):   {"color": "#FCD34D", "linestyle": ":",  "marker": "^", "label": "MJX · Ion"},
 }
 
 
@@ -193,19 +196,19 @@ def main() -> None:
 
     all_results: dict[tuple[str, str], dict[int, float]] = {}
 
-    for impl in ("linen", "nnx"):
+    for impl in ("ion",):
         print(f"\n── CPU / {impl} ──")
         all_results[("cpu", impl)] = sweep(
             "cpu", cpu_base, cpu_test.run_experiment, _CPU_ENV, impl, _CPU_SWEEP
         )
 
-    for impl in ("linen", "nnx"):
+    for impl in ("ion",):
         print(f"\n── Brax / {impl} ──")
         all_results[("brax", impl)] = sweep(
             "brax", brax_base, brax_test.run_experiment, _BRAX_ENV, impl, _GPU_SWEEP
         )
 
-    for impl in ("linen", "nnx"):
+    for impl in ("ion",):
         print(f"\n── MJX / {impl} ──")
         all_results[("mjx", impl)] = sweep(
             "mjx", mjx_base, mjx_test.run_experiment, _MJX_ENV, impl, _GPU_SWEEP

@@ -7,7 +7,7 @@ CPU backend  : mujoco_test.cpu_test  (Gymnasium, Python-loop, MuJoCoConfig)
 Brax backend : mujoco_test.brax_test (Brax JAX-native,        BraxConfig)
 MJX backend  : mujoco_test.mjx_test  (MuJoCo MJX JAX-native,  MjxConfig)
 
-Both Linen and NNX implementations are run for each backend so that six
+Linen, NNX, and Ion implementations are run for each backend so that nine
 learning curves appear on each environment plot.
 
 Outputs saved to results/mujoco_eval_{timestamp}/
@@ -47,10 +47,13 @@ from RLatScale.gym_test.cpu_test import ResourceMonitor, _print_summary, save_ru
 _STYLE: dict[tuple[str, str], dict] = {
     ("cpu",  "linen"): {"color": "#1D4ED8", "linestyle": "-",  "label": "CPU · Linen"},
     ("cpu",  "nnx"):   {"color": "#60A5FA", "linestyle": "--", "label": "CPU · NNX"},
+    ("cpu",  "ion"):   {"color": "#93C5FD", "linestyle": ":",  "label": "CPU · Ion"},
     ("brax", "linen"): {"color": "#15803D", "linestyle": "-",  "label": "Brax · Linen"},
     ("brax", "nnx"):   {"color": "#4ADE80", "linestyle": "--", "label": "Brax · NNX"},
+    ("brax", "ion"):   {"color": "#86EFAC", "linestyle": ":",  "label": "Brax · Ion"},
     ("mjx",  "linen"): {"color": "#EA580C", "linestyle": "-",  "label": "MJX · Linen"},
     ("mjx",  "nnx"):   {"color": "#FB923C", "linestyle": "--", "label": "MJX · NNX"},
+    ("mjx",  "ion"):   {"color": "#FCD34D", "linestyle": ":",  "label": "MJX · Ion"},
 }
 
 # ---------------------------------------------------------------------------
@@ -297,9 +300,9 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     print(f"\nResults directory: {out_dir}\n{'═' * 60}")
 
-    cpu_config  = dataclasses.replace(MuJoCoConfig(), impls=("linen", "nnx"), hardware_tag="")
-    brax_config = dataclasses.replace(BraxConfig(),   impls=("linen", "nnx"), hardware_tag="")
-    mjx_config  = dataclasses.replace(MjxConfig(),    impls=("linen", "nnx"), hardware_tag="")
+    cpu_config  = dataclasses.replace(MuJoCoConfig(), impls=("ion",), hardware_tag="")
+    brax_config = dataclasses.replace(BraxConfig(),   impls=("ion",), hardware_tag="")
+    mjx_config  = dataclasses.replace(MjxConfig(),    impls=("ion",), hardware_tag="")
 
     results = run_all(cpu_config, brax_config, mjx_config, out_dir)
 
