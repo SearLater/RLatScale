@@ -136,7 +136,7 @@ def train_linen_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
         def _env_step(carry, _):
             brax_state, ep_buf, step_counts, rng = carry
             obs = brax_state.obs
-            rng, rng_act = jax.random.split(rng)
+            rng, rng_act, rng_reset = jax.random.split(rng, 3)
             mean, log_std = agent_state.actor_state.apply_fn(
                 agent_state.actor_state.params, obs
             )
@@ -146,13 +146,18 @@ def train_linen_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
             value    = agent_state.critic_state.apply_fn(
                 agent_state.critic_state.params, obs
             )
-            step_counts = step_counts + 1
-            brax_state  = jit_step(brax_state, action)
-            reward = brax_state.reward
-            done   = jnp.logical_or(brax_state.done, step_counts >= episode_length).astype(jnp.float32)
-            ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
-            ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
-            step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
+            step_counts  = step_counts + 1
+            brax_stepped = jit_step(brax_state, action)
+            reward   = brax_stepped.reward
+            env_done = jnp.logical_or(brax_stepped.done, step_counts >= episode_length)
+            done     = env_done.astype(jnp.float32)
+            reset_brax = jit_reset(jax.random.split(rng_reset, config.num_envs))
+            def _sel(r, s):
+                return jnp.where(env_done.reshape((-1,) + (1,) * (r.ndim - 1)), r, s)
+            brax_state = jax.tree_util.tree_map(_sel, reset_brax, brax_stepped)
+            ep_return  = jnp.where(env_done, ep_buf + reward, jnp.nan)
+            ep_buf_new = jnp.where(env_done, 0.0, ep_buf + reward)
+            step_counts = jnp.where(env_done, 0, step_counts)
             t = BraxTransition(obs, action, reward, done, log_prob, value, ep_return)
             return (brax_state, ep_buf_new, step_counts, rng), t
 
@@ -320,7 +325,7 @@ def train_nnx_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
         def _env_step(carry, _):
             brax_state, ep_buf, step_counts, rng = carry
             obs = brax_state.obs
-            rng, rng_act = jax.random.split(rng)
+            rng, rng_act, rng_reset = jax.random.split(rng, 3)
 
             mean, log_std = nnx.merge(graphdef_a, state_a)(obs)
             noise  = jax.random.normal(rng_act, mean.shape)
@@ -328,14 +333,20 @@ def train_nnx_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
             log_prob = _normal_log_prob(action, mean, log_std)
             value    = nnx.merge(graphdef_c, state_c)(obs)
 
-            step_counts = step_counts + 1
-            brax_state  = jit_step(brax_state, action)
-            reward = brax_state.reward
-            done   = jnp.logical_or(brax_state.done, step_counts >= episode_length).astype(jnp.float32)
+            step_counts  = step_counts + 1
+            brax_stepped = jit_step(brax_state, action)
+            reward   = brax_stepped.reward
+            env_done = jnp.logical_or(brax_stepped.done, step_counts >= episode_length)
+            done     = env_done.astype(jnp.float32)
 
-            ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
-            ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
-            step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
+            reset_brax = jit_reset(jax.random.split(rng_reset, config.num_envs))
+            def _sel(r, s):
+                return jnp.where(env_done.reshape((-1,) + (1,) * (r.ndim - 1)), r, s)
+            brax_state = jax.tree_util.tree_map(_sel, reset_brax, brax_stepped)
+
+            ep_return  = jnp.where(env_done, ep_buf + reward, jnp.nan)
+            ep_buf_new = jnp.where(env_done, 0.0, ep_buf + reward)
+            step_counts = jnp.where(env_done, 0, step_counts)
 
             t = BraxTransition(obs, action, reward, done, log_prob, value, ep_return)
             return (brax_state, ep_buf_new, step_counts, rng), t
@@ -503,18 +514,26 @@ def train_ion_brax(config: BraxConfig, env_id: str, seed: int) -> dict:
         def _env_step(carry, _):
             brax_state, ep_buf, step_counts, rng = carry
             obs = brax_state.obs
-            rng, rng_act = jax.random.split(rng)
+            rng, rng_act, rng_reset = jax.random.split(rng, 3)
 
             action, log_prob, value = network.get_action_log_prob_value(obs, key=rng_act)
             # step env with clipped; store unclipped so lp_old stays consistent
-            step_counts = step_counts + 1
-            brax_state  = jit_step(brax_state, jnp.clip(action, -1.0, 1.0))
-            reward = brax_state.reward
-            done   = jnp.logical_or(brax_state.done, step_counts >= episode_length).astype(jnp.float32)
+            step_counts  = step_counts + 1
+            brax_stepped = jit_step(brax_state, jnp.clip(action, -1.0, 1.0))
+            reward   = brax_stepped.reward
+            env_done = jnp.logical_or(brax_stepped.done, step_counts >= episode_length)
+            done     = env_done.astype(jnp.float32)
 
-            ep_return  = jnp.where(done, ep_buf + reward, jnp.nan)
-            ep_buf_new = jnp.where(done, 0.0, ep_buf + reward)
-            step_counts = jnp.where(done.astype(jnp.bool_), 0, step_counts)
+            # AutoResetWrapper only triggers on brax env's internal done; manually reset
+            # on step_counts timeout too so every episode starts from a fresh initial state
+            reset_brax = jit_reset(jax.random.split(rng_reset, config.num_envs))
+            def _sel(r, s):
+                return jnp.where(env_done.reshape((-1,) + (1,) * (r.ndim - 1)), r, s)
+            brax_state = jax.tree_util.tree_map(_sel, reset_brax, brax_stepped)
+
+            ep_return  = jnp.where(env_done, ep_buf + reward, jnp.nan)
+            ep_buf_new = jnp.where(env_done, 0.0, ep_buf + reward)
+            step_counts = jnp.where(env_done, 0, step_counts)
 
             t = BraxTransition(obs, action, reward, done, log_prob, value, ep_return)
             return (brax_state, ep_buf_new, step_counts, rng), t

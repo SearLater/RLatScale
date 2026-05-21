@@ -88,6 +88,7 @@ class MuJoCoConfig(Config):
     num_steps: int = 2048
     num_epochs: int = 10
     num_minibatches: int = 32
+    hidden_dim: int = 256
     lr_actor: float = 3e-4
     lr_critic: float = 1e-3
     entropy_beta: float = 0.0
@@ -113,8 +114,9 @@ class BraxConfig(Config):
     total_timesteps: int = 50_000_000
     num_envs: int = 4096
     num_steps: int = 64
-    num_epochs: int = 4
+    num_epochs: int = 10
     num_minibatches: int = 32
+    hidden_dim: int = 256
     lr_actor: float = 3e-4
     lr_critic: float = 1e-3
     entropy_beta: float = 0.0
@@ -142,6 +144,7 @@ class MjxConfig(Config):
     num_steps: int = 128
     num_epochs: int = 10
     num_minibatches: int = 32
+    hidden_dim: int = 256
     lr_actor: float = 3e-4
     lr_critic: float = 1e-3
     entropy_beta: float = 0.0
