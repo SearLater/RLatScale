@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import csv
 import dataclasses
+import multiprocessing as mp
 from datetime import datetime
 from pathlib import Path
 
@@ -74,8 +75,24 @@ _STYLE: dict[tuple[str, str], dict] = {
 # Probe helper
 # ---------------------------------------------------------------------------
 
+def _probe_worker(queue: "mp.Queue[float | None]", config, run_fn, env_id: str, impl: str) -> None:
+    """Subprocess entry point — isolates JAX/Brax/MJX C-level state per probe."""
+    monitor = ResourceMonitor()
+    try:
+        metrics, _ = run_fn(config, env_id, impl, 1, monitor)
+        queue.put(float(metrics["mean_steps_per_second"]))
+    except Exception as exc:
+        print(f"    [SKIP] {exc!r}")
+        queue.put(None)
+
+
 def _probe(base_config, run_fn, env_id: str, impl: str, n_envs: int) -> float | None:
-    """Run a short throughput probe. Returns steps/s, or None on failure."""
+    """Run a short throughput probe in a fresh subprocess. Returns steps/s, or None on failure.
+
+    Each probe runs in its own process so that Brax/MJX C-library state (and the
+    JAX XLA runtime) is fully torn down between points. Without this, re-initialising
+    Brax environments in the same process triggers a glibc double-free (SIGABRT).
+    """
     probe = dataclasses.replace(
         base_config,
         num_envs=n_envs,
@@ -83,13 +100,15 @@ def _probe(base_config, run_fn, env_id: str, impl: str, n_envs: int) -> float | 
         total_timesteps=_PROBE_ROLLOUTS * n_envs * _PROBE_STEPS,
         hardware_tag="",
     )
-    monitor = ResourceMonitor()
-    try:
-        metrics, _ = run_fn(probe, env_id, impl, 1, monitor)
-        return float(metrics["mean_steps_per_second"])
-    except Exception as exc:
-        print(f"    [SKIP] {exc!r}")
+    ctx = mp.get_context("spawn")
+    queue = ctx.Queue()
+    p = ctx.Process(target=_probe_worker, args=(queue, probe, run_fn, env_id, impl))
+    p.start()
+    p.join()
+    if p.exitcode != 0:
+        print(f"    [SKIP] process crashed (exit code {p.exitcode})")
         return None
+    return queue.get_nowait() if not queue.empty() else None
 
 
 # ---------------------------------------------------------------------------
