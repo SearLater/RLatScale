@@ -123,7 +123,9 @@ def _probe(base_config, run_fn, env_id: str, impl: str, n_envs: int) -> float | 
         timeout=600,
     )
     if result.returncode != 0:
-        print(f"    [SKIP] (exit {result.returncode})")
+        err = result.stderr.strip().splitlines()
+        last = err[-1] if err else "(no stderr)"
+        print(f"    [SKIP] (exit {result.returncode}) {last}")
         return None
     try:
         return json.loads(result.stdout.strip())["sps"]
