@@ -48,11 +48,11 @@ _PROBE_ROLLOUTS = 3     # rollouts per probe point
 _PROBE_STEPS    = 64    # override num_steps for all backends (keeps probes fast)
 
 # CPU MuJoCo sim is slow per step; keep sweep small to avoid hour-long runs.
-_CPU_SWEEP:      list[int] = [2**i for i in range(7)]                      # 1 → 64
-_GPU_SWEEP:      list[int] = [2**i for i in range(20)] + [1_000_000]       # 1 → 1 M
+_CPU_SWEEP:      list[int] = [2**i for i in range(7)]       # 1 → 64
 # Brax crashes with SIGABRT for very small env counts due to its physics backend.
 # Start from 8 — uninteresting for a GPU scaling study anyway.
-_BRAX_GPU_SWEEP: list[int] = [2**i for i in range(3, 20)] + [1_000_000]   # 8 → 1 M
+_BRAX_GPU_SWEEP: list[int] = [2**i for i in range(3, 21)]  # 8 → 1,048,576 (2^20)
+_MJX_GPU_SWEEP:  list[int] = [2**i for i in range(17)]     # 1 → 65,536 (2^16)
 
 # Environment identifiers per backend
 _CPU_ENV  = "HalfCheetah-v4"   # Gymnasium name
@@ -67,13 +67,13 @@ _MJX_ENV  = "halfcheetah"
 _STYLE: dict[tuple[str, str], dict] = {
     ("cpu",  "linen"): {"color": "#1D4ED8", "linestyle": "-",  "marker": "o", "label": "CPU · Linen"},
     ("cpu",  "nnx"):   {"color": "#60A5FA", "linestyle": "--", "marker": "s", "label": "CPU · NNX"},
-    ("cpu",  "ion"):   {"color": "#93C5FD", "linestyle": ":",  "marker": "^", "label": "CPU · Ion"},
+    ("cpu",  "ion"):   {"color": "#1D4ED8", "linestyle": "-",  "marker": "o", "label": "CPU"},
     ("brax", "linen"): {"color": "#15803D", "linestyle": "-",  "marker": "o", "label": "Brax · Linen"},
     ("brax", "nnx"):   {"color": "#4ADE80", "linestyle": "--", "marker": "s", "label": "Brax · NNX"},
-    ("brax", "ion"):   {"color": "#86EFAC", "linestyle": ":",  "marker": "^", "label": "Brax · Ion"},
+    ("brax", "ion"):   {"color": "#15803D", "linestyle": "-",  "marker": "o", "label": "Brax"},
     ("mjx",  "linen"): {"color": "#EA580C", "linestyle": "-",  "marker": "o", "label": "MJX · Linen"},
     ("mjx",  "nnx"):   {"color": "#FB923C", "linestyle": "--", "marker": "s", "label": "MJX · NNX"},
-    ("mjx",  "ion"):   {"color": "#FCD34D", "linestyle": ":",  "marker": "^", "label": "MJX · Ion"},
+    ("mjx",  "ion"):   {"color": "#EA580C", "linestyle": "-",  "marker": "o", "label": "MJX"},
 }
 
 
@@ -264,7 +264,7 @@ def main() -> None:
     for impl in ("ion",):
         print(f"\n── MJX / {impl} ──")
         all_results[("mjx", impl)] = sweep(
-            "mjx", mjx_base, mjx_test.run_experiment, _MJX_ENV, impl, _GPU_SWEEP
+            "mjx", mjx_base, mjx_test.run_experiment, _MJX_ENV, impl, _MJX_GPU_SWEEP
         )
 
     print(f"\n{'═' * 60}\nGenerating outputs …")
