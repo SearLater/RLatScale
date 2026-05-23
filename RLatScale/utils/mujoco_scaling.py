@@ -22,9 +22,12 @@ Usage
 
 from __future__ import annotations
 
+import argparse
 import csv
 import dataclasses
-import multiprocessing as mp
+import json
+import subprocess
+import sys
 from datetime import datetime
 from pathlib import Path
 
@@ -72,43 +75,58 @@ _STYLE: dict[tuple[str, str], dict] = {
 
 
 # ---------------------------------------------------------------------------
-# Probe helper
+# Single-probe subprocess entry point
 # ---------------------------------------------------------------------------
 
-def _probe_worker(queue: "mp.Queue[float | None]", config, run_fn, env_id: str, impl: str) -> None:
-    """Subprocess entry point — isolates JAX/Brax/MJX C-level state per probe."""
-    monitor = ResourceMonitor()
-    try:
-        metrics, _ = run_fn(config, env_id, impl, 1, monitor)
-        queue.put(float(metrics["mean_steps_per_second"]))
-    except Exception as exc:
-        print(f"    [SKIP] {exc!r}")
-        queue.put(None)
-
-
-def _probe(base_config, run_fn, env_id: str, impl: str, n_envs: int) -> float | None:
-    """Run a short throughput probe in a fresh subprocess. Returns steps/s, or None on failure.
-
-    Each probe runs in its own process so that Brax/MJX C-library state (and the
-    JAX XLA runtime) is fully torn down between points. Without this, re-initialising
-    Brax environments in the same process triggers a glibc double-free (SIGABRT).
-    """
+def _run_single_probe(backend: str, env_id: str, impl: str, n_envs: int) -> None:
+    """Run one probe point and print the result as JSON. Called via --probe CLI flag."""
+    _CONFIG = {"cpu": MuJoCoConfig, "brax": BraxConfig, "mjx": MjxConfig}
+    _RUN_FN = {
+        "cpu":  cpu_test.run_experiment,
+        "brax": brax_test.run_experiment,
+        "mjx":  mjx_test.run_experiment,
+    }
     probe = dataclasses.replace(
-        base_config,
+        _CONFIG[backend](),
         num_envs=n_envs,
         num_steps=_PROBE_STEPS,
         total_timesteps=_PROBE_ROLLOUTS * n_envs * _PROBE_STEPS,
         hardware_tag="",
     )
-    ctx = mp.get_context("spawn")
-    queue = ctx.Queue()
-    p = ctx.Process(target=_probe_worker, args=(queue, probe, run_fn, env_id, impl))
-    p.start()
-    p.join()
-    if p.exitcode != 0:
-        print(f"    [SKIP] process crashed (exit code {p.exitcode})")
+    monitor = ResourceMonitor()
+    metrics, _ = _RUN_FN[backend](probe, env_id, impl, 1, monitor)
+    print(json.dumps({"sps": float(metrics["mean_steps_per_second"])}))
+
+
+# ---------------------------------------------------------------------------
+# Probe helper
+# ---------------------------------------------------------------------------
+
+def _probe(base_config, run_fn, env_id: str, impl: str, n_envs: int) -> float | None:
+    """Run a short throughput probe in a fresh interpreter. Returns steps/s, or None.
+
+    Uses subprocess.run so no fork() occurs in the parent — loading Brax/MJX
+    environments multiple times in the same process triggers a glibc double-free.
+    Each probe is a completely fresh Python process with no inherited C state.
+    """
+    _BACKEND = {MuJoCoConfig: "cpu", BraxConfig: "brax", MjxConfig: "mjx"}
+    backend  = _BACKEND[type(base_config)]
+
+    result = subprocess.run(
+        [sys.executable, "-m", "RLatScale.utils.mujoco_scaling",
+         "--probe", backend, env_id, impl, str(n_envs)],
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    if result.returncode != 0:
+        print(f"    [SKIP] (exit {result.returncode})")
         return None
-    return queue.get_nowait() if not queue.empty() else None
+    try:
+        return json.loads(result.stdout.strip())["sps"]
+    except (json.JSONDecodeError, KeyError):
+        print(f"    [SKIP] unexpected output: {result.stdout!r}")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -204,6 +222,14 @@ def save_csv(
 # ---------------------------------------------------------------------------
 
 def main() -> None:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--probe", nargs=4, metavar=("BACKEND", "ENV", "IMPL", "N_ENVS"))
+    args, _ = parser.parse_known_args()
+    if args.probe:
+        backend, env_id, impl, n_envs = args.probe
+        _run_single_probe(backend, env_id, impl, int(n_envs))
+        return
+
     ts      = datetime.now().strftime("%Y%m%d_%H%M%S")
     out_dir = Path("results") / f"mujoco_scaling_{ts}"
     out_dir.mkdir(parents=True, exist_ok=True)
