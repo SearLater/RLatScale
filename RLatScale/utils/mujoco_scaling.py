@@ -50,10 +50,10 @@ _PROBE_STEPS    = 64    # override num_steps for all backends (keeps probes fast
 
 # CPU MuJoCo sim is slow per step; keep sweep small to avoid hour-long runs.
 _CPU_SWEEP:      list[int] = [2**i for i in range(7)]       # 1 → 64
-# Brax crashes with SIGABRT for very small env counts due to its physics backend.
-# Start from 8 — uninteresting for a GPU scaling study anyway.
-_BRAX_GPU_SWEEP: list[int] = [2**i for i in range(3, 21)]  # 8 → 1,048,576 (2^20)
-_MJX_GPU_SWEEP:  list[int] = [2**i for i in range(17)]     # 1 → 65,536 (2^16)
+# Brax requires a minimum num_envs for its GPU kernel launch; small counts crash.
+# Start from 4096 (BraxConfig training default) where it is known to work.
+_BRAX_GPU_SWEEP: list[int] = [2**i for i in range(12, 21)]  # 4,096 → 1,048,576 (2^20)
+_MJX_GPU_SWEEP:  list[int] = [2**i for i in range(17)]      # 1 → 65,536 (2^16)
 
 # Environment identifiers per backend
 _CPU_ENV  = "HalfCheetah-v4"   # Gymnasium name
