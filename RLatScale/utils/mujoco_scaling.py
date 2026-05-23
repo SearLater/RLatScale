@@ -48,8 +48,11 @@ _PROBE_ROLLOUTS = 3     # rollouts per probe point
 _PROBE_STEPS    = 64    # override num_steps for all backends (keeps probes fast)
 
 # CPU MuJoCo sim is slow per step; keep sweep small to avoid hour-long runs.
-_CPU_SWEEP:  list[int] = [2**i for i in range(7)]           # 1 → 64
-_GPU_SWEEP:  list[int] = [2**i for i in range(24)] + [10_000_000]  # 1 → ~16 M
+_CPU_SWEEP:      list[int] = [2**i for i in range(7)]                      # 1 → 64
+_GPU_SWEEP:      list[int] = [2**i for i in range(20)] + [1_000_000]       # 1 → 1 M
+# Brax crashes with SIGABRT for very small env counts due to its physics backend.
+# Start from 8 — uninteresting for a GPU scaling study anyway.
+_BRAX_GPU_SWEEP: list[int] = [2**i for i in range(3, 20)] + [1_000_000]   # 8 → 1 M
 
 # Environment identifiers per backend
 _CPU_ENV  = "HalfCheetah-v4"   # Gymnasium name
@@ -141,14 +144,19 @@ def sweep(
     impl: str,
     counts: list[int],
 ) -> dict[int, float]:
-    """Probe throughput for each num_envs in counts; stop at first failure."""
+    """Probe throughput for each num_envs in counts; skip failures, stop on OOM."""
     results: dict[int, float] = {}
+    consecutive_failures = 0
     for n in counts:
         print(f"  [{backend.upper()}/{impl}] {n:>10,} envs …", end=" ", flush=True)
         sps = _probe(base_config, run_fn, env_id, impl, n)
         if sps is None:
             print()
-            break
+            consecutive_failures += 1
+            if consecutive_failures >= 3:
+                break  # three in a row → likely OOM ceiling, stop
+            continue
+        consecutive_failures = 0
         print(f"{sps:>12,.0f} steps/s")
         results[n] = sps
     return results
@@ -250,7 +258,7 @@ def main() -> None:
     for impl in ("ion",):
         print(f"\n── Brax / {impl} ──")
         all_results[("brax", impl)] = sweep(
-            "brax", brax_base, brax_test.run_experiment, _BRAX_ENV, impl, _GPU_SWEEP
+            "brax", brax_base, brax_test.run_experiment, _BRAX_ENV, impl, _BRAX_GPU_SWEEP
         )
 
     for impl in ("ion",):

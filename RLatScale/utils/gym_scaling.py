@@ -42,7 +42,7 @@ _PROBE_ENV      = "CartPole-v1"   # fastest env; isolates raw throughput
 
 # Log-scale sweeps (powers of 2, capped per backend)
 _CPU_SWEEP: list[int] = [2**i for i in range(10)]          # 1 → 512
-_GPU_SWEEP: list[int] = [2**i for i in range(24)] + [10_000_000]  # 1 → ~16 M
+_GPU_SWEEP: list[int] = [2**i for i in range(20)] + [1_000_000]  # 1 → 1 M
 
 
 # ---------------------------------------------------------------------------
