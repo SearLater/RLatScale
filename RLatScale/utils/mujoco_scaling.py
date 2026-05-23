@@ -26,6 +26,7 @@ import argparse
 import csv
 import dataclasses
 import json
+import os
 import subprocess
 import sys
 from datetime import datetime
@@ -115,12 +116,18 @@ def _probe(base_config, run_fn, env_id: str, impl: str, n_envs: int) -> float | 
     _BACKEND = {MuJoCoConfig: "cpu", BraxConfig: "brax", MjxConfig: "mjx"}
     backend  = _BACKEND[type(base_config)]
 
+    env = {
+        **os.environ,
+        "XLA_PYTHON_CLIENT_ALLOCATOR": "platform",
+        "XLA_PYTHON_CLIENT_PREALLOCATE": "false",
+    }
     result = subprocess.run(
         [sys.executable, "-m", "RLatScale.utils.mujoco_scaling",
          "--probe", backend, env_id, impl, str(n_envs)],
         capture_output=True,
         text=True,
         timeout=600,
+        env=env,
     )
     if result.returncode != 0:
         err = result.stderr.strip().splitlines()
