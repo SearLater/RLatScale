@@ -32,7 +32,7 @@ class Config:
 
     # --- Experiment ---
     # tuple used (not list) so Config remains hashable for jax.tree_util.register_static
-    num_seeds: int = 1
+    num_seeds: int = 5
     envs: tuple[str, ...] = ("CartPole-v1", "Pendulum-v1")
     impls: tuple[str, ...] = ("ion",)
     results_dir: str = "results"
@@ -68,7 +68,7 @@ class GPUConfig(Config):
     num_envs: int = 2048
     num_steps: int = 128
     num_minibatches: int = 8
-    num_seeds: int = 1
+    num_seeds: int = 10
     impls: tuple[str, ...] = ("nnx", "ion")
     hardware_tag: str = "4090"
 
@@ -83,8 +83,8 @@ class MuJoCoConfig(Config):
     num_rollouts = 2_000_000 // 2_048 ≈ 976
     """
 
-    total_timesteps: int = 2_000_000
-    num_envs: int = 1
+    total_timesteps: int = 10_000_000
+    num_envs: int = 16
     num_steps: int = 2048
     num_epochs: int = 10
     num_minibatches: int = 32
@@ -92,7 +92,7 @@ class MuJoCoConfig(Config):
     lr_actor: float = 3e-4
     lr_critic: float = 1e-3
     entropy_beta: float = 0.0
-    num_seeds: int = 3
+    num_seeds: int = 10
     envs: tuple[str, ...] = ("HalfCheetah-v4", "Ant-v4")
     impls: tuple[str, ...] = ("nnx", "ion")
     hardware_tag: str = "4090"
@@ -120,7 +120,7 @@ class BraxConfig(Config):
     lr_actor: float = 3e-4
     lr_critic: float = 1e-3
     entropy_beta: float = 0.0
-    num_seeds: int = 3
+    num_seeds: int = 10
     envs: tuple[str, ...] = ("halfcheetah", "ant")
     results_dir: str = "results/brax"
     hardware_tag: str = "4090"
@@ -148,7 +148,7 @@ class MjxConfig(Config):
     lr_actor: float = 3e-4
     lr_critic: float = 1e-3
     entropy_beta: float = 0.0
-    num_seeds: int = 3
+    num_seeds: int = 10
     envs: tuple[str, ...] = ("halfcheetah", "ant")
     results_dir: str = "results/mjx"
     hardware_tag: str = "4090"
